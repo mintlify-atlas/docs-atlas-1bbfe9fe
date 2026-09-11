@@ -1,5 +1,5 @@
 ---
-title: "Prowl.Unwrapper: Mesh UV Unwrapping for Lightmap Atlas Baking"
+title: "Prowl.Unwrapper: Mesh UV Unwrapping for Lightmaps"
 sidebarTitle: "Unwrapper"
 description: "Prowl.Unwrapper produces non-overlapping UV atlases from arbitrary triangle meshes using Projection or Conformal LSCM algorithms in pure C#."
 ---
@@ -189,6 +189,22 @@ Prowl.Unwrapper ships two independent algorithms, selectable via `UnwrapOptions.
 
 <ParamField body="LloydChangePrevThreshold" type="double">
   Early-out threshold: if fewer than this fraction of facets changed chart compared to the previous iteration, segmentation is declared stable. Default `0.01`.
+</ParamField>
+
+<ParamField body="LloydChangePrev2Threshold" type="double">
+  Same as `LloydChangePrevThreshold` but compared against two iterations ago. Catches slowly-oscillating segmentations that would otherwise never trigger the single-step early-out. Default `0.01`.
+</ParamField>
+
+<ParamField body="ChartAreaThreshold" type="double">
+  Minimum fraction of total component area a chart must cover to be retained as standalone. Charts below this value (and also below `ChartFacetCountThreshold`) are folded into their best-fitting neighbour. Default `0.02`.
+</ParamField>
+
+<ParamField body="ChartFacetCountThreshold" type="double">
+  Minimum fraction of total triangle count a chart must cover to be retained as standalone. Used in conjunction with `ChartAreaThreshold`. Default `0.01`.
+</ParamField>
+
+<ParamField body="StraightnessPower" type="double">
+  Exponent applied to the straightness metric when scoring chart-growth candidates during Lloyd segmentation. Higher values bias the segmenter toward charts with straighter boundaries. Default `1.0`.
 </ParamField>
 
 ```csharp

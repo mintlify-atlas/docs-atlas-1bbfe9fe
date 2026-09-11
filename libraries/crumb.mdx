@@ -253,12 +253,12 @@ catch (UnexpectedTokenException ex)
 }
 ```
 
-<ParamField body="UnexpectedTokenException.Expected" type="TKind">
-  The kind that was required.
+<ParamField body="UnexpectedTokenException.Expected" type="string">
+  The name of the kind that was required, as a string (e.g., `"LBrace"`).
 </ParamField>
 
-<ParamField body="UnexpectedTokenException.Actual" type="TKind">
-  The kind that was found.
+<ParamField body="UnexpectedTokenException.Actual" type="string">
+  The name of the kind that was found, as a string.
 </ParamField>
 
 <ParamField body="UnexpectedTokenException.Line" type="int">

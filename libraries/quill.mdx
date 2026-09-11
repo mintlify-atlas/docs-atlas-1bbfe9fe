@@ -46,14 +46,15 @@ Pre-built backend packages are available for the most common .NET graphics stack
 
 ## Creating a Canvas
 
-Instantiate `Canvas` with an `ICanvasRenderer` and an optional `FontAtlasSettings` for text rendering:
+Instantiate `Canvas` with an `ICanvasRenderer` and a `FontAtlasSettings` for text rendering:
 
 ```csharp
 ICanvasRenderer renderer = new MyRenderer();
 FontAtlasSettings atlasSettings = new FontAtlasSettings
 {
-    AtlasWidth = 1024,
-    AtlasHeight = 1024,
+    AtlasSize = 1024,        // initial atlas side length in pixels
+    MaxAtlasSize = 4096,     // upper bound on atlas growth
+    AllowExpansion = true,
 };
 
 Canvas canvas = new Canvas(renderer, atlasSettings);
@@ -289,14 +290,13 @@ canvas.RestoreState();
 
 ## SVG Support
 
-`SVGParser.Parse` converts SVG markup into a tree of `SvgElement` objects, and `SVGRenderer` walks that tree issuing Quill canvas calls:
+`SVGParser.ParseSVGDocument` parses an SVG file from disk into a tree of `SvgElement` objects, and `SVGRenderer.DrawToCanvas` walks that tree issuing Quill canvas calls:
 
 ```csharp
-string svgSource = File.ReadAllText("icon.svg");
-SvgElement root = SVGParser.Parse(svgSource);
+SvgElement root = SVGParser.ParseSVGDocument("icon.svg");
 
 canvas.BeginFrame(512, 512, 1.0f);
-SVGRenderer.Render(canvas, root, offsetX: 0, offsetY: 0, scale: 1.0f);
+SVGRenderer.DrawToCanvas(canvas, position: new Float2(0, 0), svgElement: root);
 canvas.Render();
 ```
 
@@ -321,15 +321,16 @@ Quill integrates with Prowl.Scribe through the `TextRenderer` class, which imple
 ```csharp
 FontAtlasSettings atlasSettings = new FontAtlasSettings
 {
-    AtlasWidth = 1024,
-    AtlasHeight = 1024,
-    // Additional glyph quality and padding settings.
+    AtlasSize = 1024,        // initial atlas side length in pixels
+    MaxAtlasSize = 4096,     // upper bound on atlas growth
+    AllowExpansion = true,
+    AtlasPadding = 1,
 };
 
 Canvas canvas = new Canvas(renderer, atlasSettings);
 ```
 
-Text is drawn through the embedded `FontSystem` on the canvas. Retrieve the `TextRenderer` to call Scribe's `FontSystem` API directly for advanced layout and rich text.
+Text is drawn through the embedded `FontSystem` on the canvas. Retrieve the `TextRenderer` via `canvas.TextRenderer` to call Scribe's `FontSystem` API directly (`TextRenderer.FontEngine` exposes the underlying `FontSystem`) for advanced layout and rich text.
 
 ## Custom Shaders
 

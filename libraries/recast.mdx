@@ -16,13 +16,16 @@ dotnet add package Prowl.Recast
 
 | Namespace | Contents |
 |---|---|
-| `Prowl.Recast.Core` | Math (`RcVec3f`, `RcVec2f`, `RcMatrix4x4f`), collections (`RcObjectPool<T>`, `RcBinaryMinHeap<T>`, fixed arrays), `RcContext`, `IRcCompressor` |
-| `Prowl.Recast` | Navmesh baking: `RcBuilder`, `RcConfig`, `RcHeightfield`, `RcCompactHeightfield`, `RcContourSet`, `RcPolyMesh`, `RcPolyMeshDetail` |
-| `Prowl.Recast.Detour` | Runtime pathfinding: `DtNavMesh`, `DtNavMeshQuery`, `DtPathUtils`, `DtQueryDefaultFilter` |
+| `Prowl.Recast.Core` | `RcContext`, `IRcCompressor` |
+| `Prowl.Recast.Core.Numerics` | Math types: `RcVec3f`, `RcVec2f`, `RcMatrix4x4f` |
+| `Prowl.Recast.Core.Collections` | `RcBinaryMinHeap<T>`, `RcFixedArray1<T>` … `RcFixedArray1024<T>` |
+| `Prowl.Recast.Core.Buffers` | `RcObjectPool<T>`, `RcRentedArray<T>` |
+| `Prowl.Recast` | Navmesh baking: `RcBuilder`, `RcBuilderConfig`, `RcConfig`, `RcHeightfield`, `RcCompactHeightfield`, `RcContourSet`, `RcPolyMesh`, `RcPolyMeshDetail` |
+| `Prowl.Recast.Geom` | Input geometry helpers: `IRcInputGeomProvider`, `RcSampleInputGeomProvider` |
+| `Prowl.Recast.Detour` | Runtime pathfinding: `DtNavMesh`, `DtNavMeshQuery`, `DtNavMeshBuilder`, `DtPathUtils`, `DtQueryDefaultFilter` |
 | `Prowl.Recast.Detour.Crowd` | Agent simulation: `DtCrowd`, `DtCrowdAgent`, `DtCrowdAgentParams`, `DtCrowdConfig` |
 | `Prowl.Recast.Detour.TileCache` | Tile streaming: `DtTileCache` for large open worlds |
 | `Prowl.Recast.Detour.Dynamic` | Runtime obstacle add/remove: `DtDynamicNavMesh`, collider types |
-| `Prowl.Recast.Geom` | Input geometry helpers: `IRcInputGeomProvider`, `RcSimpleInputGeomProvider` |
 
 ## Navmesh Generation
 
@@ -36,36 +39,34 @@ using Prowl.Recast.Geom;
 
 // 1. Describe bake parameters
 var cfg = new RcConfig(
-    useTiles:               false,
-    tileSizeX:              0,
-    tileSizeZ:              0,
-    borderSize:             3,
-    partition:              RcPartition.WATERSHED,
-    cs:                     0.3f,          // cell size (XZ)
-    ch:                     0.2f,          // cell height (Y)
-    walkableSlopeAngle:     45f,
-    walkableHeight:         2,             // voxels
-    walkableClimb:          1,
-    walkableRadius:         1,
-    maxEdgeLen:             12,
-    maxSimplificationError: 1.3f,
-    minRegionArea:          8,
-    mergeRegionArea:        20,
-    maxVertsPerPoly:        6,
-    detailSampleDist:       6f,
-    detailSampleMaxError:   1f,
-    filterLowHangingObstacles:  true,
-    filterLedgeSpans:           true,
-    filterWalkableLowHeightSpans: true
+    partitionType:                RcPartition.WATERSHED,
+    cellSize:                     0.3f,   // XZ cell size
+    cellHeight:                   0.2f,   // Y cell height
+    agentMaxSlope:                45f,
+    agentHeight:                  2.0f,
+    agentRadius:                  0.6f,
+    agentMaxClimb:                0.9f,
+    regionMinSize:                8,
+    regionMergeSize:              20,
+    edgeMaxLen:                   12f,
+    edgeMaxError:                 1.3f,
+    vertsPerPoly:                 6,
+    detailSampleDist:             6f,
+    detailSampleMaxError:         1f,
+    filterLowHangingObstacles:    true,
+    filterLedgeSpans:             true,
+    filterWalkableLowHeightSpans: true,
+    walkableAreaMod:              new RcAreaModification(1),
+    buildMeshDetail:              true
 );
 
 // 2. Supply geometry — wrap your triangle soup
-var geom = new RcSimpleInputGeomProvider(vertices, indices);
+var geom = new RcSampleInputGeomProvider(vertices, indices);
 
-// 3. Build — returns a list of RcBuilderResult (one per tile, or one for solo)
-var builder = new RcBuilder();
-var ctx     = new RcContext();
-RcBuilderResult result = builder.Build(geom, cfg, keepInterResults: false, ctx);
+// 3. Build — pass geom + a RcBuilderConfig wrapping the RcConfig
+var builder    = new RcBuilder();
+var builderCfg = new RcBuilderConfig(cfg, geom.GetMeshBoundsMin(), geom.GetMeshBoundsMax());
+RcBuilderResult result = builder.Build(geom, builderCfg, keepInterResults: false);
 
 // 4. Inspect intermediate products if needed
 RcPolyMesh       polyMesh   = result.Mesh;
@@ -84,7 +85,9 @@ using Prowl.Recast.Detour;
 // Build runtime nav mesh from the bake result
 DtNavMeshCreateParams navParams = new DtNavMeshCreateParams();
 // ... populate from polyMesh / detailMesh fields ...
-DtNavMesh navMesh = DtNavMeshBuilder.CreateNavMesh(navParams);
+DtMeshData meshData = DtNavMeshBuilder.CreateNavMeshData(navParams);
+var navMesh = new DtNavMesh();
+navMesh.Init(meshData, navParams.nvp, 0);
 
 // Create a query object
 var query  = new DtNavMeshQuery(navMesh);
@@ -165,10 +168,10 @@ var tileCache = new DtTileCache(tcParams, new DtTileCacheStorageParams(),
 
 // Load a pre-baked tile from disk
 byte[] tileData = File.ReadAllBytes($"tiles/{tx}_{tz}.tile");
-tileCache.AddTile(tileData, DtTileFlags.DT_COMPRESSEDTILE_FREE_DATA, out long tileRef);
+long tileRef = tileCache.AddTile(tileData, flags: 0);
 
 // Update the tile cache — processes pending re-bake requests
-tileCache.Update(deltaTime: 0f, navMesh, out bool upToDate);
+bool upToDate = tileCache.Update();
 ```
 
 Unloading is handled by `tileCache.RemoveTile(tileRef)`.
@@ -179,16 +182,18 @@ Add and remove obstacles on the navmesh at runtime with the `DtDynamic` module. 
 
 ```csharp
 using Prowl.Recast.Detour.Dynamic;
+using Prowl.Recast.Detour.Dynamic.Colliders;
 
-// Create a dynamic navmesh from a voxel file or tile data
-var dynNavMesh = new DtDynamicNavMesh(dynNavMeshData);
+// Create a dynamic navmesh from a DtVoxelFile (pre-built voxel data)
+var dynNavMesh = new DtDynamicNavMesh(voxelFile);
 
 // Add a box obstacle (e.g. a fallen crate)
+// DtBoxCollider takes center, half-edge vectors, area ID, and merge threshold
 long obstacleRef = dynNavMesh.AddCollider(
-    new DtBoxCollider(center, halfExtents, transform));
+    new DtBoxCollider(center, halfEdges, area: 1, flagMergeThreshold: 0.1f));
 
-// Rebuild the affected tiles (can be done async)
-bool done = dynNavMesh.Update(out _);
+// Rebuild the affected tiles; returns true when all tiles are up to date
+bool done = dynNavMesh.Update();
 
 // Remove the obstacle later
 dynNavMesh.RemoveCollider(obstacleRef);
@@ -196,16 +201,16 @@ dynNavMesh.RemoveCollider(obstacleRef);
 
 ## Core Utilities
 
-| Type | Purpose |
-|---|---|
-| `RcContext` | Logging and performance timing for the bake pipeline |
-| `RcVec3f` | 3-component float vector with full math operators |
-| `RcVec2f` | 2-component float vector |
-| `RcObjectPool<T>` | Lock-free object pool for reducing GC pressure in the detour runtime |
-| `RcBinaryMinHeap<T>` | Binary min-heap used by A* internally; reusable for custom searches |
-| `RcFixedArray1<T>` … `RcFixedArray1024<T>` | Stack-allocated fixed-size arrays (unmanaged constraint) |
-| `RcLogCategory` | `RC_LOG_PROGRESS`, `RC_LOG_WARNING`, `RC_LOG_ERROR` |
-| `IRcCompressor` | Interface for tile-data compression (ZSTD, LZ4, etc.) |
+| Type | Namespace | Purpose |
+|---|---|---|
+| `RcContext` | `Prowl.Recast.Core` | Logging and performance timing for the bake pipeline |
+| `IRcCompressor` | `Prowl.Recast.Core` | Interface for tile-data compression (ZSTD, LZ4, etc.) |
+| `RcVec3f` | `Prowl.Recast.Core.Numerics` | 3-component float vector with full math operators |
+| `RcVec2f` | `Prowl.Recast.Core.Numerics` | 2-component float vector |
+| `RcMatrix4x4f` | `Prowl.Recast.Core.Numerics` | 4×4 float matrix |
+| `RcObjectPool<T>` | `Prowl.Recast.Core.Buffers` | Lock-free object pool for reducing GC pressure in the detour runtime |
+| `RcBinaryMinHeap<T>` | `Prowl.Recast.Core.Collections` | Binary min-heap used by A* internally; reusable for custom searches |
+| `RcFixedArray1<T>` … `RcFixedArray1024<T>` | `Prowl.Recast.Core.Collections` | Stack-allocated fixed-size arrays (unmanaged constraint) |
 
 <Info>
 Prowl.Recast is licensed under the ZLib license, matching the original recastnavigation and DotRecast projects. See `LICENSE.txt` in the package for details.

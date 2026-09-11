@@ -1,5 +1,5 @@
 ---
-title: "Prowl.Photonic: CPU Path-Traced Lightmap Baker with AVX2 Acceleration"
+title: "Prowl.Photonic: CPU Path-Traced Lightmap Baker for .NET"
 sidebarTitle: "Photonic"
 description: "Prowl.Photonic bakes HDR lightmap atlases using progressive CPU path tracing with BVH4 acceleration, configurable bounces, and SIMD AVX2 performance."
 ---
@@ -69,7 +69,7 @@ Key `LightmapBaker` methods:
 | `CreateTextureTarget(name, w, h)` | Allocate an atlas page; returns `LightmapTarget` |
 | `Start()` | Kick off continuous progressive baking on a background thread |
 | `Cancel()` | Cancel the running job via `CancellationToken` |
-| `BakeProbes(positions, samples, bounces)` | Batch-bake spherical-harmonic irradiance probes |
+| `BakeProbes(positions, samplesPerProbe, bounces)` | Batch-bake spherical-harmonic irradiance probes at the given world positions |
 
 ## BakeOptions
 
@@ -232,7 +232,7 @@ job2.RunIterations(64);   // blocks until 64 iterations complete, then returns
 baker.Cancel();           // stop the background worker
 ```
 
-`JobStatus` values: `Pending` (still running), `Cancelled`, `Failed` (see `Job.Error`).
+`JobStatus` values: `Pending` (not yet finished — either not started or still running), `Cancelled`, `Failed` (see `Job.Error`).
 
 | Member | Description |
 |---|---|
@@ -270,11 +270,11 @@ LightmapTarget[] pages = result.Targets;
 
 ## Spherical Harmonics
 
-`Sh9Rgb` stores a degree-2 spherical harmonics irradiance probe as three arrays of 9 coefficients (one per color channel). Use `baker.BakeProbes` to batch-bake probes at world positions and store them in `Sh9Rgb[]` for runtime ambient lighting.
+`Sh9Rgb` stores a degree-2 (L2) spherical harmonics irradiance probe as nine `Float3` fields (`C0`–`C8`), one field per SH coefficient with RGB packed into each `Float3`. Use `baker.BakeProbes` to batch-bake probes at world positions and store them in `Sh9Rgb[]` for runtime ambient lighting.
 
 ```csharp
-var probePositions = new Float3[] { new(0,1,0), new(5,1,0) };
-Sh9Rgb[] probes = baker.BakeProbes(probePositions, samples: 512, bounces: 2);
+IReadOnlyList<Float3> probePositions = new Float3[] { new(0,1,0), new(5,1,0) };
+Sh9Rgb[] probes = baker.BakeProbes(probePositions, samplesPerProbe: 512, bounces: 2);
 
 // At runtime: evaluate irradiance for a surface normal
 Sh9Rgb probe = probes[0];

@@ -232,7 +232,7 @@ if (TextureData.TryLoad(File.ReadAllBytes("terrain.dds"),
         Console.WriteLine($"Format: {data!.Format}  ({data.FormatName})");
         Console.WriteLine($"Mips:   {data.MipCount}");
 
-        TextureLevel level0 = data.GetLevel(mipLevel: 0, slice: 0);
+        TextureLevel level0 = data.Level(mipLevel: 0, slice: 0)!;
         ReadOnlySpan<byte> blocks = level0.Bytes.Span;
 
         // Pass directly to the graphics API.

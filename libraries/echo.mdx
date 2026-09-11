@@ -1,7 +1,7 @@
 ---
-title: "Prowl.Echo: High-Performance .NET Serialization with Source Generation"
+title: "Prowl.Echo: High-Performance .NET Serialization Library"
 sidebarTitle: "Echo"
-description: "Prowl.Echo serializes to an intermediate EchoObject tree, then writes Binary, JSON, XML, YAML, or BSON — with Roslyn source generation that outperforms System.Text.Json."
+description: "Prowl.Echo serializes .NET objects to Binary, JSON, XML, YAML, or BSON. Source generation produces reflection-free code that outperforms System.Text.Json."
 ---
 
 Prowl.Echo is a high-performance, flexible serialization library that converts your objects into an intermediate `EchoObject` tree before writing to any supported file format. This two-stage design lets you inspect, transform, or diff data before it hits disk or the network. A Roslyn source generator can emit fully-typed, zero-reflection serialization code at compile time, making Echo faster than `System.Text.Json` and `Newtonsoft.Json` on both serialize and deserialize benchmarks — while still handling complex scenarios like circular references, polymorphism, and GUID-based external asset references.

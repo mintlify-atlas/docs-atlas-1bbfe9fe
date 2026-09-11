@@ -31,16 +31,20 @@ From the Anthology repository root, invoke `Merge-Library.ps1` with the library'
 ./scripts/Merge-Library.ps1 -Name Vector -Source ../Prowl.Vector
 ```
 
-On **Linux or macOS**, the equivalent Bash script is available:
+On **Linux or macOS**, the equivalent Bash script is available and uses short flags:
 
 ```bash
-./scripts/Merge-Library.sh -Name Vector -Source ../Prowl.Vector
+./scripts/Merge-Library.sh -n Vector -s ../Prowl.Vector
 ```
 
 If the source repository's default branch is not `main` (for example, `Scribe` uses `master` and `Slang` uses `Managed`), pass the branch name explicitly:
 
 ```powershell
 ./scripts/Merge-Library.ps1 -Name Scribe -Source ../Prowl.Scribe -Branch master
+```
+
+```bash
+./scripts/Merge-Library.sh -n Scribe -s ../Prowl.Scribe -b master
 ```
 
 When the script completes you will see:

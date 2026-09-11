@@ -1,7 +1,7 @@
 ---
-title: "Prowl.Graphite: Cross-Platform Low-Level GPU Graphics for .NET"
+title: "Prowl.Graphite: Low-Level Vulkan GPU Abstraction for .NET"
 sidebarTitle: "Graphite"
-description: "Prowl.Graphite is a Vulkan-backed GPU abstraction for .NET 10 with a declarative render graph, string-id resource binding, and an execution ring for CPU/GPU sync."
+description: "Prowl.Graphite is a Vulkan-backed GPU abstraction for .NET with a declarative render graph, string-id PropertySet binding, and a built-in execution ring."
 ---
 
 Prowl.Graphite is a cross-platform, low-level graphics and compute abstraction layer for .NET 10 that powers the rendering foundation of the Prowl Game Engine. Built on Vulkan (with macOS support via MoltenVK), Graphite departs from prior art like Veldrid by unifying shader pipeline state into a monolithic `ShaderProgram` model, hiding per-backend binding rules behind a string-id `PropertySet` API, and baking a frames-in-flight execution ring directly into `GraphicsDevice`. The result is a library that feels high-level enough to be productive while still exposing the full surface needed for AAA-quality rendering pipelines, custom postprocessing, and GPU compute.
@@ -61,7 +61,7 @@ GraphicsDevice device = GraphicsDevice.CreateVulkan(options, swapchainDescriptio
 ```
 
 <Tip>
-Set `GraphicsDeviceOptions.EnableValidation` to `true` during development. The validation layer wraps every object with argument and state checks and throws descriptive exceptions on misuse. Disable it for release builds.
+Set `GraphicsDeviceOptions.EnableValidation = true` during development. The validation layer wraps every object with argument and state checks and throws descriptive exceptions on misuse. It defaults to enabled, so set it to `false` explicitly for release builds. The separate `Debug` flag enables driver-level debug layers (e.g. Vulkan validation layers).
 </Tip>
 
 `GraphicsDevice` exposes device identity through several read-only properties:
@@ -208,7 +208,7 @@ Apply the property set to a command buffer before drawing:
 
 ```csharp
 cmd.SetShader(myShader);
-cmd.ApplyProperties(props);
+cmd.SetProperties(props);
 cmd.DrawIndexed();
 ```
 

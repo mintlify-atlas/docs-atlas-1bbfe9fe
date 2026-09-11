@@ -65,8 +65,20 @@ Server.Stop();
   Allocates and registers a new Map instance. Maps define observation scope — clients observe a map by having a `PlayerEntity` assigned inside it.
 </ParamField>
 
-<ParamField body="Server.Spawn&lt;T&gt;(Map, RemoteClient?, Action&lt;T&gt;?)" type="T">
-  Spawns a `NetworkEntity` subclass into a map with an optional owner and initializer callback. Fires `OnSpawn`, `OnStartServer`, and `OnStartClient` (on observers) in that order.
+<ParamField body="Server.Spawn&lt;T&gt;(Map)" type="T">
+  Spawns an unowned `NetworkEntity` subclass into a map. Fires `OnSpawn` then `OnStartServer`.
+</ParamField>
+
+<ParamField body="Server.Spawn&lt;T&gt;(Map, RemoteClient)" type="T">
+  Spawns an owned entity in the given map. The `RemoteClient` becomes the entity's `Owner`.
+</ParamField>
+
+<ParamField body="Server.Spawn&lt;T&gt;(Map, Action&lt;T&gt;)" type="T">
+  Spawns an unowned entity and runs the initializer callback before lifecycle hooks fire, so the entity can be configured before observers see it.
+</ParamField>
+
+<ParamField body="Server.Spawn&lt;T&gt;(Map, RemoteClient, Action&lt;T&gt;)" type="T">
+  Spawns an owned entity with an initializer that runs before lifecycle hooks. The most flexible overload.
 </ParamField>
 
 <ParamField body="Server.Reset()" type="void">
@@ -124,8 +136,8 @@ public class EnemyEntity : NetworkEntity
     public override void ServerTick()    { /* per-tick logic, server only    */ }
     public override void ClientTick()    { /* per-tick logic, client only    */ }
 
-    public override void OnOwnerChanged()  { /* new owner assigned             */ }
-    public override void OnMapChanged()    { /* entity moved between maps      */ }
+    public override void OnOwnerChanged(RemoteClient? oldOwner, RemoteClient? newOwner) { /* new owner assigned */ }
+    public override void OnMapChanged(Map oldMap, Map newMap)                           { /* entity moved between maps */ }
     public override void OnDespawn()       { /* entity about to be destroyed   */ }
 }
 ```
@@ -320,7 +332,7 @@ Commands can return `RpcPromise` or `RpcPromise<T>` to receive a reply from the 
 [EntityCommand(RequireOwner = false)]
 public RpcPromise<string> CmdGetServerStatus()
 {
-    return $"Online — {Server.PlayerCount} players";
+    return $"Online — {Server.Clients.Count} players";
 }
 
 // On the client

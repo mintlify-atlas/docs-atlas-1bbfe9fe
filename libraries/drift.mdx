@@ -1,5 +1,5 @@
 ---
-title: "Prowl.Drift: Lightweight 2D Rigid Body Physics Engine"
+title: "Prowl.Drift: Lightweight 2D Rigid Body Physics for C#"
 sidebarTitle: "Drift"
 description: "Prowl.Drift is a pure-C# 2D physics engine with SAT collision detection, spatial hashing, broad/narrow phase, and eight joint constraint types."
 ---
@@ -43,8 +43,8 @@ The `Space` also exposes `Bodies`, `Joints`, and `Contacts` as read-only lists f
 var ground = new Body(Body.BodyType.Static, new Vector2(400, 580));
 space.AddBody(ground);
 
-// Kinematic body — moves at programmer-controlled velocity, unaffected by forces
-var platform = new Body(Body.BodyType.Kinematic, new Vector2(200, 300));
+// Kinetic body — moves at programmer-controlled velocity, unaffected by forces
+var platform = new Body(Body.BodyType.Kinetic, new Vector2(200, 300));
 platform.LinearVelocity = new Vector2(50, 0);
 space.AddBody(platform);
 
@@ -57,7 +57,7 @@ Key `Body` properties:
 
 | Property | Description |
 |---|---|
-| `Type` | `Static`, `Kinematic`, or `Dynamic` |
+| `Type` | `Static`, `Kinetic`, or `Dynamic` |
 | `Position` | World-space position of the center of mass |
 | `LinearVelocity` | Linear velocity vector |
 | `Angle` | Orientation in radians |
@@ -93,8 +93,8 @@ var verts = new Vector2[]
 var poly = new ShapePoly(verts);
 body.AddShape(poly);
 
-// Line segment with rounded thickness (for ramps, rails)
-var seg = new ShapeSegment(new Vector2(-100, 0), new Vector2(100, 0), thickness: 2f);
+// Line segment with rounded caps (for ramps, rails)
+var seg = new ShapeSegment(new Vector2(-100, 0), new Vector2(100, 0), radius: 2f);
 ground.AddShape(seg);
 ```
 
@@ -168,32 +168,32 @@ Drift provides eight joint types. Create a joint, set its properties, and regist
 
 ```csharp
 // Revolute joint — hinge two bodies around a shared world-space anchor
-var hinge = new RevoluteJoint(bodyA, bodyB, worldAnchor: new Vector2(200, 300));
+var hinge = new RevoluteJoint(bodyA, bodyB, anchor: new Vector2(200, 300));
 hinge.CollideConnected = false;
 space.AddJoint(hinge);
 
-// Distance joint — maintain a 150-unit distance between two local anchors
+// Distance joint — maintain a set distance between two world anchors
 var spring = new DistanceJoint(
     bodyA, bodyB,
-    anchorA: new Vector2(0, 10),
-    anchorB: new Vector2(0, -10));
-// spring.Length is auto-computed from the current body positions
+    anchor1: new Vector2(0, 10),
+    anchor2: new Vector2(0, -10));
+// spring restLength is auto-computed from the distance between the two anchors
 
 // Rope joint — maximum distance constraint
 var rope = new RopeJoint(
     bodyA, bodyB,
-    anchorA: Vector2.Zero,
-    anchorB: Vector2.Zero);
+    anchor1: Vector2.Zero,
+    anchor2: Vector2.Zero);
 
 // Weld joint — rigid bond at a world anchor
-var weld = new WeldJoint(bodyA, bodyB, worldAnchor: new Vector2(100, 100));
+var weld = new WeldJoint(bodyA, bodyB, anchor: new Vector2(100, 100));
 space.AddJoint(weld);
 
-// Mouse joint — drag bodyA toward a screen-space point
-var drag = new MouseJoint(bodyA, bodyB, worldTarget: mousePos);
+// Mouse joint — spring-pull body toward a world-space target point
+var drag = new MouseJoint(mouseBody, targetBody, anchor: mousePos);
 space.AddJoint(drag);
-// Update each frame:
-drag.Target = currentMousePos;
+// Update each frame by moving the mouse body's position:
+mouseBody.Position = currentMousePos;
 ```
 
 All joints share `Body1`, `Body2`, `Space`, and `CollideConnected` (whether the connected bodies collide with each other).

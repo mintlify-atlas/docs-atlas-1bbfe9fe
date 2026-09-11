@@ -127,25 +127,29 @@ Mesh mesh = model.Meshes[0];
 
 Console.WriteLine($"Verts: {mesh.VertexCount}");
 
-// Flat arrays — null when the source/post-process didn't produce them
-float[]? positions = mesh.Positions;   // XYZ interleaved
-float[]? normals   = mesh.Normals;     // XYZ interleaved
-float[]? tangents  = mesh.Tangents;    // XYZW interleaved (W = bitangent sign)
-float[]? uv0       = mesh.UV0;         // UV interleaved
-float[]? colors    = mesh.Colors;      // RGBA interleaved
+// Typed arrays — null when the source/post-process didn't produce them
+Float3[]  positions = mesh.Vertices;           // vertex positions (always present)
+Float3[]? normals   = mesh.Normals;            // vertex normals
+Float4[]? tangents  = mesh.Tangents;           // XYZW (W = bitangent sign, MikkTSpace)
+Float2[]? uv0       = mesh.UVs[0];             // primary UV channel
+Color[]?  colors    = mesh.Colors;             // vertex colors
 
 // Bone weights (4 influences per vertex after LimitBoneWeights)
 BoneWeight[]? weights = mesh.BoneWeights;
 
-// Sub-meshes partition index data by material
-foreach (var sub in mesh.SubMeshes)
+// Shared index buffer; use GetIndices32/GetIndices16 to extract per-sub-mesh
+uint[] allIndices = mesh.Indices;
+
+// Sub-meshes partition the index buffer by material
+for (int s = 0; s < mesh.SubMeshes.Length; s++)
 {
-    int matIndex = sub.MaterialIndex;
-    int[] indices = sub.Indices;
-    PrimitiveTopology topo = sub.Topology; // Triangles, Lines, Points, ...
+    var sub = mesh.SubMeshes[s];
+    int matIndex   = sub.MaterialIndex;
+    uint[] indices = mesh.GetIndices32(s);    // extracts this sub-mesh's index run
+    PrimitiveTopology topo = sub.Topology;    // Triangles, Lines, Points, ...
 }
 
-// Axis-aligned bounds (populated by GenerateBounds)
+// Axis-aligned bounds covering all vertex positions
 Bounds b = mesh.Bounds;
 ```
 
@@ -158,11 +162,11 @@ Bounds b = mesh.Bounds;
 ```csharp
 Material mat = model.Materials[0];
 
-// PBR base
-float[] baseColor   = mat.BaseColorFactor;        // RGBA [0-1]
-float   metallic    = mat.MetallicFactor;
-float   roughness   = mat.RoughnessFactor;
-float[] emissive    = mat.EmissiveFactor;          // RGB
+// PBR base — all are linear values
+Color baseColor = mat.BaseColor;          // RGBA [0-1]
+float metallic  = mat.Metallic;           // 0 = dielectric, 1 = metal
+float roughness = mat.Roughness;          // 0 = smooth, 1 = rough
+Color emissive  = mat.EmissiveFactor;     // RGB emissive
 
 // Texture slots — null when absent
 mat.BaseColorTexture
@@ -172,7 +176,7 @@ mat.OcclusionTexture
 mat.EmissiveTexture
 
 // Alpha handling
-MaterialAlphaMode mode = mat.AlphaMode;  // Opaque | Mask | Blend
+MaterialAlphaMode mode   = mat.AlphaMode;   // Opaque | Mask | Blend
 float             cutoff = mat.AlphaCutoff;
 
 // Sampler on each texture

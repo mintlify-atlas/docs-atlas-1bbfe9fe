@@ -6,6 +6,10 @@ description: "Prowl.Origami provides production-ready UI widgets — buttons, ta
 
 Prowl.Origami is a complete, production-ready widget library layered directly on top of Prowl.Paper. Where Paper gives you raw primitives — boxes, colors, events, transitions — Origami gives you buttons, sliders, tables, tree views, charts, dockable panels, and 3D viewport gizmos, all consistent in visual style and interaction model. The static `Origami` class is the single entry point: every widget factory is a static method that accepts a `Paper` instance, a string ID, and widget-specific arguments, returns a fluent builder you configure with method chains, and finalizes with `.Show()`. Because Origami is immediate-mode, there are no widget objects to store — call the factory each frame with the current state and Origami handles the rest.
 
+<Note>
+The namespace for all Origami types is `Prowl.OrigamiUI`.
+</Note>
+
 ## Installation
 
 ```bash
@@ -37,7 +41,7 @@ Skipping `EndFrame` means modals, toasts, and tooltips queued during that frame 
 
 ## Theming
 
-`OrigamiTheme` is the complete visual configuration for a widget tree. It contains seven 4-stop color ramps, semantic surface colors, an `OrigamiMetrics` block for sizing constants, an `OrigamiIcons` set for widget chrome, and five font face slots.
+`OrigamiTheme` is the complete visual configuration for a widget tree. It contains seven 7-stop color ramps (`Neutral`, `Primary`, `Blue`, `Red`, `Green`, `Amber`, and `Ink`), semantic surface colors, an `OrigamiMetrics` block for sizing constants, an `OrigamiIcons` set for widget chrome, and five font face slots.
 
 ### Creating and Applying Themes
 
@@ -78,7 +82,7 @@ Widgets expose `.Variant(OrigamiVariant v)` plus convenient shorthands like `.Pr
 
 ### OrigamiRamp & OrigamiMetrics
 
-`OrigamiRamp` is a 7-stop color container (`C100` darkest → `C700` lightest). `OrigamiRamp.LerpColor` and `OrigamiRamp.Lerp` are the primitives used for theme transitions; reach for `LerpColor` when writing a custom widget that needs to interpolate colors during hover/press animations.
+`OrigamiRamp` is a 7-stop color container (`C100` darkest → `C700` lightest) with public fields for each stop. `OrigamiRamp.LerpColor` and `OrigamiRamp.Lerp` are the static methods used for theme transitions; reach for `LerpColor` when writing a custom widget that needs to interpolate colors during hover/press animations.
 
 `OrigamiMetrics` (`theme.Metrics`) holds every sizing constant: corner radii (`Rounding`, `ContainerRounding`, `SmallRounding`), row heights (`RowHeight`, `HeaderHeight`, `CompactHeight`), spacing scales, font sizes, docking metrics (`TabBarHeight`, `SplitterSize`), and node-graph metrics (`GraphPortRadius`, `GraphGridSpacing`). Swap one `OrigamiMetrics` instance to retheme density globally.
 
@@ -111,14 +115,14 @@ Origami's input widgets produce values by calling your callback when a value cha
   <Tab title="Slider">
     ```csharp
     // Single-value slider
-    Origami.Slider(paper, "volume", volume, 0f, 1f, val => volume = val)
+    Origami.Slider(paper, "volume", volume, val => volume = val, 0f, 1f)
         .Label("Volume")
         .ShowValue()
         .Show();
 
     // Range slider (two handles)
-    Origami.RangeSlider(paper, "range", minVal, maxVal, 0f, 100f,
-        (lo, hi) => { minVal = lo; maxVal = hi; })
+    Origami.RangeSlider(paper, "range", minVal, maxVal,
+        (lo, hi) => { minVal = lo; maxVal = hi; }, 0f, 100f)
         .Show();
     ```
   </Tab>
@@ -130,8 +134,8 @@ Origami's input widgets produce values by calling your callback when a value cha
         .Min(0f).Max(100f)
         .Show();
 
-    // Vector field (Float2, Float3, Float4, etc.)
-    Origami.VectorField(paper, "pos", position, val => position = val)
+    // Vector fields (Float2, Float3, Float4, Int2, Int3, Int4, Double2, Double3, Double4)
+    Origami.Float2Field(paper, "pos", position, val => position = val)
         .Label("Position")
         .Show();
 
@@ -144,19 +148,19 @@ Origami's input widgets produce values by calling your callback when a value cha
   <Tab title="Selectors">
     ```csharp
     // Dropdown
-    Origami.Dropdown(paper, "quality", qualityIndex, qualityOptions,
-        i => qualityIndex = i)
+    Origami.Dropdown(paper, "quality", qualityIndex,
+        i => qualityIndex = i, qualityOptions)
         .Label("Quality")
         .Show();
 
     // Multi-select dropdown
-    Origami.MultiDropdown(paper, "tags", selectedTags, allTags,
-        tags => selectedTags = tags)
+    Origami.MultiDropdown(paper, "tags", selectedTags,
+        tags => selectedTags = tags, allTags)
         .Show();
 
     // Radio group
-    Origami.RadioGroup(paper, "orient", selectedIndex, new[] { "Horizontal", "Vertical" },
-        i => selectedIndex = i)
+    Origami.RadioGroup(paper, "orient", selectedIndex,
+        i => selectedIndex = i, new[] { "Horizontal", "Vertical" })
         .Show();
 
     // Color picker
@@ -223,12 +227,12 @@ All overlay widgets are queued during the frame and rendered by `Origami.EndFram
         onYes: DiscardChanges);
 
     // Fully custom modal
-    Modal.Custom("Settings", paper =>
+    Modal.Push(Modal.Custom("Settings", paper =>
     {
         Origami.Label(paper, "hint", "Theme").Show();
-        Origami.Dropdown(paper, "theme", themeIdx, themeNames,
-            i => themeIdx = i).Show();
-    }, width: 480).Show();
+        Origami.Dropdown(paper, "theme", themeIdx,
+            i => themeIdx = i, themeNames).Show();
+    }, width: 480));
     ```
   </Tab>
   <Tab title="Toasts">
@@ -606,7 +610,7 @@ void DrawEditorUI(Paper paper, float dt)
                 .Warning().Show();
 
             // ── Exposure slider ───────────────────────────────────
-            Origami.Slider(paper, "exposure", exposure, 0f, 4f, v => exposure = v)
+            Origami.Slider(paper, "exposure", exposure, v => exposure = v, 0f, 4f)
                 .Label("Exposure")
                 .ShowValue()
                 .Show();

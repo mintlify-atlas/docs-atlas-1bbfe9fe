@@ -18,7 +18,7 @@ Prowl.Ember is split into three NuGet packages with distinct roles.
     AOT-safe attributes and interfaces (`IReloadAware`, `[ReloadIgnore]`, `ReloadCache<,>`, etc.). No engine dependency — reference this in game code.
   </Card>
   <Card title="Prowl.Ember.Analyzers" icon="magnifying-glass">
-    Bundled Roslyn analyzer (EMBA001–EMBA005) that warns at compile time about patterns that won't survive hot reload.
+    Bundled Roslyn analyzer (EMBA001, EMBA002, EMBA003, EMBA005) that warns at compile time about patterns that won't survive hot reload.
   </Card>
 </CardGroup>
 
@@ -208,7 +208,7 @@ var method = _updateMethods[entity.GetType()]; // computed on first access; clea
 
 ## Roslyn Analyzer Diagnostics
 
-The bundled `Prowl.Ember.Analyzers` package runs inside the compiler and reports four diagnostic codes.
+The bundled `Prowl.Ember.Analyzers` package runs inside the compiler and reports four diagnostic codes: EMBA001, EMBA002, EMBA003, and EMBA005.
 
 <Accordion title="EMBA001 — Static member of generic type">
   **Severity:** Warning

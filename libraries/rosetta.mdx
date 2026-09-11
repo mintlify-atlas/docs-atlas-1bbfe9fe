@@ -1,5 +1,5 @@
 ---
-title: "Prowl.Rosetta: Localization with CLDR Plural Rules and Provider Layers"
+title: "Prowl.Rosetta: CLDR Localization with Provider Layers"
 sidebarTitle: "Rosetta"
 description: "Prowl.Rosetta is a backend-agnostic .NET localization library with CLDR plural rules, gender forms, named interpolation, and runtime locale switching."
 ---
@@ -267,10 +267,10 @@ public void Plural_ShouldSelectCorrectForm()
 {
     Loc.Configure(cfg => cfg
         .SetFallbackLocale("en")
-        .AddProvider(new InMemoryProvider(new Dictionary<string, string>
+        .AddProvider(new InMemoryProvider("en", new Dictionary<string, string>
         {
-            ["item.count:one"]   = "{{count}} item",
-            ["item.count:other"] = "{{count}} items",
+            ["item.count.one"]   = "{{count}} item",
+            ["item.count.other"] = "{{count}} items",
         }))
         .SetLocale("en")
     );

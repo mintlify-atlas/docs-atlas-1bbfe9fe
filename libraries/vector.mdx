@@ -59,7 +59,7 @@ Float3  normal  = Float3.Normalize(new Float3(1f, 1f, 0f));
 double dot      = Double3.Dot(position, Double3.UnitY);
 Double3 cross   = Double3.Cross(position, Double3.UnitZ);
 double dist     = Double3.Distance(position, Double3.Zero);
-Double3 halfway = Double3.Lerp(position, Double3.Zero, 0.5);
+Double3 halfway = Maths.Lerp(position, Double3.Zero, 0.5);
 
 // Spherical interpolation along the unit sphere
 Double3 slerped = Double3.Slerp(Double3.UnitX, Double3.UnitZ, 0.5);
@@ -80,7 +80,7 @@ var uniformScale = Double4x4.CreateScale(2.0);
 // Combined TRS in one call
 var transform = Double4x4.CreateTRS(
     new Double3(10, 0, 5),
-    Quaternion.FromEuler(new Double3(0, 45, 0)),
+    Quaternion.FromEuler(new Float3(0f, 45f, 0f)),
     new Double3(1, 1, 1)
 );
 
@@ -106,30 +106,30 @@ Use `Double4x4` for editor tools and offline pipelines where precision accumulat
 
 ## Quaternion
 
-The single `Quaternion` type is stored as double-precision `(X, Y, Z, W)` and is designed around the patterns Unity developers already know. The `*` operator applies a rotation to a `Double3`.
+The single `Quaternion` type is stored as single-precision `float` components `(X, Y, Z, W)` and is designed around the patterns Unity developers already know. The `*` operator applies a rotation to a `Float3`.
 
 ```csharp
 // Construction
-var euler    = Quaternion.FromEuler(new Double3(pitch: 30, yaw: 90, roll: 0));
-var axisAngle = Quaternion.AxisAngle(Double3.UnitY, Maths.PI / 4.0);
-var lookAt   = Quaternion.LookRotation(
-    forward: Double3.UnitZ,
-    upwards: Double3.UnitY
+var euler     = Quaternion.FromEuler(new Float3(30f, 90f, 0f)); // pitch, yaw, roll in degrees
+var axisAngle = Quaternion.AxisAngle(Float3.UnitY, Maths.PI / 4.0f);
+var lookAt    = Quaternion.LookRotation(
+    forward: Float3.UnitZ,
+    up: Float3.UnitY
 );
 
 // Interpolation
-var halfway = Quaternion.Slerp(euler, axisAngle, 0.5);  // smooth
-var fast    = Quaternion.Nlerp(euler, axisAngle, 0.5);  // cheaper, unit-sphere approx
+var halfway = Quaternion.Slerp(euler, axisAngle, 0.5f);  // smooth
+var fast    = Quaternion.Nlerp(euler, axisAngle, 0.5f);  // cheaper, unit-sphere approx
 
 // Apply rotation to a point
-Double3 rotated = axisAngle * new Double3(1, 0, 0);
+Float3 rotated = axisAngle * new Float3(1f, 0f, 0f);
 
 // Decompose back to Euler
-Double3 angles = euler.EulerAngles;
+Float3 angles = euler.EulerAngles;
 
 // Convert to/from matrix
-var   mat  = Double4x4.CreateFromQuaternion(euler);
-var   back = Quaternion.FromMatrix(mat);
+var mat  = Double4x4.CreateFromQuaternion(euler);
+var back = Quaternion.FromMatrix((Float4x4)mat);  // FromMatrix takes Float4x4
 ```
 
 ---
@@ -366,7 +366,7 @@ var ray = new Ray(new Float3(0, 10, 0), -Float3.UnitY);
 // Ray vs AABB
 bool hitBox = Intersection.RayAABB(
     ray.Origin, ray.Direction,
-    box.Min, box.Max, out double tBox);
+    box.Min, box.Max, out float tMin, out float tMax);
 
 // Ray vs Triangle (Möller–Trumbore)
 bool hitTri = Intersection.RayTriangle(
@@ -374,7 +374,7 @@ bool hitTri = Intersection.RayTriangle(
     v0: new Float3(-1, 0, -1),
     v1: new Float3( 1, 0, -1),
     v2: new Float3( 0, 0,  1),
-    out double t, out double u, out double v);
+    out float t, out float u, out float v);
 
 // Sphere vs Sphere overlap
 bool spheresOverlap = Intersection.SphereSphereOverlap(
@@ -396,7 +396,7 @@ Intersection.ClosestPointOnAABBToPoint(box.Min, box.Max,
 
 ```csharp
 // Build a box as GeometryData
-GeometryData mesh = GeometryGenerator.GenerateCube(1f);
+GeometryData mesh = GeometryGenerator.Box(1f, 1f, 1f);
 
 // Subdivide — Catmull–Clark style face subdivision
 GeometryOperators.Subdivide(mesh);
@@ -422,8 +422,8 @@ GeometryData.TriangleMesh triangles = mesh.ToTriangleMesh();
 `GeometryCSG` performs Constructive Solid Geometry on any two `GeometryData` meshes:
 
 ```csharp
-GeometryData sphere = GeometryGenerator.GenerateSphere(1f, 32);
-GeometryData box    = GeometryGenerator.GenerateCube(1.5f);
+GeometryData sphere = GeometryGenerator.Sphere(1f, segments: 32);
+GeometryData box    = GeometryGenerator.Box(1.5f, 1.5f, 1.5f);
 
 // Boolean operations
 GeometryData union    = GeometryCSG.Union(sphere, box);
@@ -483,8 +483,8 @@ int proxyId = dynBvh.Add(entity, entity.WorldBounds);
 // Each frame: update only moved entities
 dynBvh.Update(proxyId, entity.WorldBounds);
 
-// Broad-phase overlap query
-dynBvh.QueryAABB(camera.FrustumAABB, visibleEntities =>
+// Broad-phase overlap query — callback receives one item at a time
+dynBvh.QueryAABB(camera.FrustumAABB, entity =>
 {
     // fine-phase test here
 });

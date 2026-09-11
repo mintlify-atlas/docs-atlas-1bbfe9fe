@@ -62,20 +62,21 @@ fs.MaxLayoutCacheSize = 256;    // Maximum number of cached layouts
 ### Loading Fonts
 
 ```csharp
-// Load all system fonts, prioritising these families on the current OS.
-fs.LoadSystemFonts("Segoe UI", "Arial", "Liberation Sans");
+// Enumerate all installed system fonts and add them as fallbacks.
+foreach (FontFile sysFont in fs.EnumerateSystemFonts())
+    fs.AddFallbackFont(sysFont);
 
-// Add an individual font from bytes.
-FontFile fontFile = fs.AddFont(File.ReadAllBytes("path/to/MyFont.ttf"));
+// Load an individual font from a file path.
+FontFile fontFile = new FontFile("path/to/MyFont.ttf");
 
 // Add a fallback used when the primary font is missing a glyph.
-fs.AddFallbackFont(fs.AddFont(File.ReadAllBytes("NotoSans-Regular.ttf")));
+fs.AddFallbackFont(new FontFile("NotoSans-Regular.ttf"));
 ```
 
 ### Drawing Text
 
 ```csharp
-FontFile font = fs.GetFont("Arial", FontStyle.Regular);
+FontFile font = new FontFile("fonts/Arial.ttf");
 
 // One-liner draw — positions at a Float2, any size.
 fs.DrawText("Hello, Scribe!", position: new Float2(40, 80),
@@ -89,17 +90,21 @@ fs.DrawText("Centered Text", new Float2((800 - size.X) / 2, 50),
 
 ## Loading Fonts
 
-`FontFile` wraps parsed TTF data. Load from a file path, a byte array, or a `Stream`:
+`FontFile` wraps parsed TTF data. Construct from a file path, a byte array, or a `Stream`:
 
 ```csharp
 // From a file path
-FontFile fromPath = FontFile.Load("fonts/Roboto-Regular.ttf");
+FontFile fromPath = new FontFile("fonts/Roboto-Regular.ttf");
 
 // From a byte array (e.g. embedded resource)
 byte[] ttfBytes = Assembly.GetExecutingAssembly()
     .GetManifestResourceStream("MyApp.Fonts.Roboto-Regular.ttf")!
     .ToArray();
-FontFile fromBytes = FontFile.FromBytes(ttfBytes);
+FontFile fromBytes = new FontFile(ttfBytes);
+
+// From a Stream
+using Stream stream = File.OpenRead("fonts/Roboto-Regular.ttf");
+FontFile fromStream = new FontFile(stream);
 ```
 
 `FontFile` exposes full Unicode codepoint mapping, glyph outlines, horizontal and vertical metrics, and kerning pair tables. The underlying rasteriser is based on STB TrueType.
@@ -109,9 +114,11 @@ FontFile fromBytes = FontFile.FromBytes(ttfBytes);
 For anything beyond simple one-liners, use `TextLayoutSettings` and the `FontSystem` layout pipeline. The settings struct captures everything that affects how text is broken and positioned:
 
 ```csharp
+FontFile arialRegular = new FontFile("fonts/Arial.ttf");
+
 TextLayoutSettings settings = new TextLayoutSettings
 {
-    Font          = fs.GetFont("Arial", FontStyle.Regular),
+    Font          = arialRegular,
     PixelSize     = 16f,
     WrapMode      = TextWrapMode.Wrap,
     Alignment     = TextAlignment.Left,
@@ -130,7 +137,7 @@ fs.DrawText("Long paragraph text that wraps at 400 pixels...",
             new Float2(20, 100), FontColor.White, settings);
 
 // Or get the layout object for hit-testing / custom rendering
-TextLayout layout = fs.Layout("Selectable text", settings);
+TextLayout layout = fs.CreateLayout("Selectable text", settings);
 ```
 
 `TextWrapMode` and `TextAlignment` enums:
@@ -156,7 +163,8 @@ Scribe supports Unity-style inline markup tags. Parse source text into a `RichTe
 
 ```csharp
 string source = "Normal <b>bold</b> and <color=#FF4466>red</color> and " +
-                "<wave>wavy</wave> text with a <link=https://prowlengine.com>link</link>.";
+                "<wave>wavy</wave> text with a <link=https://prowlengine.com>link</link>.\n" +
+                "Use a literal < by escaping it as \\<.";
 
 RichTextParseResult parsed = RichTextParser.Parse(source);
 // parsed.VisibleText — the source with all tags stripped
@@ -169,36 +177,42 @@ Supported tags:
 
 | Tag | Effect |
 |---|---|
-| `[b]` / `</b>` | Bold |
-| `[i]` / `</i>` | Italic |
-| `[u]` / `</u>` | Underline |
-| `[s]` / `</s>` | Strikethrough |
-| `[mono]` | Monospace font |
-| `[color=#RRGGBB]` | Colour override (hex or named) |
-| `[size=N]` | Pixel size override |
-| `[link=url]` | Clickable link span |
-| `[wave]` | Wave animation effect |
-| `[shake]` | Shake animation effect |
-| `[rainbow]` | Rainbow colour cycle |
-| `[pulse]` | Pulse opacity effect |
-| `[fade]` | Fade effect |
-| `[jitter]` | Per-character jitter |
-| `[typewriter]` | Typewriter reveal |
+| `<b>` / `</b>` | Bold |
+| `<i>` / `</i>` | Italic |
+| `<u>` / `</u>` | Underline |
+| `<s>` / `</s>` | Strikethrough |
+| `<mono>` | Monospace font |
+| `<color=#RRGGBB>` | Colour override (hex or named) |
+| `<size=N>` | Pixel size override |
+| `<link=url>` | Clickable link span |
+| `<wave>` | Wave animation effect |
+| `<shake>` | Shake animation effect |
+| `<rainbow>` | Rainbow colour cycle |
+| `<pulse>` | Pulse opacity effect |
+| `<fade>` | Fade effect |
+| `<jitter>` | Per-character jitter |
+| `<typewriter>` | Typewriter reveal |
 
 `RichStyleFlags` is a `[Flags]` byte enum (`Bold`, `Italic`, `Underline`, `Strike`, `Mono`, `Link`). `RichEffectKind` enumerates all animated effects.
 
 ```csharp
 RichTextLayoutSettings richSettings = new RichTextLayoutSettings
 {
-    BaseSettings = settings,
-    BoldFont     = fs.GetFont("Arial", FontStyle.Bold),
-    ItalicFont   = fs.GetFont("Arial", FontStyle.Italic),
-    MonoFont     = fs.GetFont("Consolas", FontStyle.Regular),
+    RegularFont  = new FontFile("fonts/Arial.ttf"),
+    BoldFont     = new FontFile("fonts/Arial-Bold.ttf"),
+    ItalicFont   = new FontFile("fonts/Arial-Italic.ttf"),
+    MonoFont     = new FontFile("fonts/Consolas.ttf"),
+    PixelSize    = 16f,
+    MaxWidth     = 600f,
+    WrapMode     = TextWrapMode.Wrap,
+    DefaultColor = FontColor.White,
 };
 
-RichTextLayout richLayout = RichTextLayout.Build(parsed, fs, richSettings);
-// richLayout.Lines — List<RichLine> with RichGlyph entries
-// RichGlyph carries the GlyphInstance plus the active RichStyleFlags and color.
+// Construct the layout object, then call Update to parse and lay out glyphs.
+RichTextLayout richLayout = new RichTextLayout(source, richSettings);
+richLayout.Update(fs);
+// richLayout.Lines — IReadOnlyList<RichLine> with RichGlyph entries
+// RichGlyph carries AtlasGlyph, position, color, RichStyleFlags, and LinkHref.
 ```
 
 Animated effects are applied at draw time through `RichTextEffects`, which takes the current elapsed time and returns per-glyph `RichEffectResult` offsets and colour multipliers.
@@ -211,14 +225,17 @@ Scribe includes a lightweight Markdown parser that produces an AST, and a `Markd
 // Parse Markdown source into an AST
 MarkdownDocument document = Markdown.Parse(markdownSource);
 
-// Configure which fonts to use for each role
+// Configure which fonts to use for each role.
+// Signature: Default(FontFile textFont, float width, FontFile? monoFont = null,
+//                    FontFile? boldFont = null, FontFile? italicFont = null,
+//                    FontFile? boldItalicFont = null)
 MarkdownLayoutSettings mdSettings = MarkdownLayoutSettings.Default(
-    body:      fs.GetFont("Arial",    FontStyle.Regular),
-    mono:      fs.GetFont("Consolas", FontStyle.Regular),
-    bold:      fs.GetFont("Arial",    FontStyle.Bold),
-    italic:    fs.GetFont("Arial",    FontStyle.Italic),
-    boldItalic:fs.GetFont("Arial",    FontStyle.BoldItalic),
-    width:     400);
+    textFont:      new FontFile("fonts/Arial.ttf"),
+    width:         400f,
+    monoFont:      new FontFile("fonts/Consolas.ttf"),
+    boldFont:      new FontFile("fonts/Arial-Bold.ttf"),
+    italicFont:    new FontFile("fonts/Arial-Italic.ttf"),
+    boldItalicFont:new FontFile("fonts/Arial-BoldItalic.ttf"));
 
 // Layout relative to (0, 0)
 IMarkdownImageProvider imageProvider = new MyImageProvider();
@@ -237,32 +254,36 @@ The `MarkdownDisplayList` holds a flat `IReadOnlyList<IDrawOp>` of three operati
 
 | `IDrawOp` | Fields | Description |
 |---|---|---|
-| `DrawText` | `Text`, `Position`, `Font`, `PixelSize`, `Color` | A single text run at a position |
-| `DrawQuad` | `Bounds` (`RectangleF`), `Color` | Solid coloured rectangle (rules, blockquote bars) |
-| `DrawImage` | `Bounds`, `ImageKey` | An image placeholder resolved by `IMarkdownImageProvider` |
+| `DrawText` | `Layout` (`TextLayout`), `Pos`, `Color`, `Decorations`, `LinkRanges` | A laid-out text run at a position |
+| `DrawQuad` | `Rect` (`RectangleF`), `Color` | Solid coloured rectangle (rules, blockquote bars) |
+| `DrawImage` | `Rect`, `Texture` | An image resolved by `IMarkdownImageProvider` |
 
 The AST uses `BlockKind` (Paragraph, Heading1–6, Code, Blockquote, ListItem, ThematicBreak, Table, etc.) and `InlineKind` (Text, Strong, Emphasis, Code, Link, Image, LineBreak, etc.) enums for all nodes.
 
 ## Glyph Metrics
 
-Query per-glyph metrics from a `FontFile` for custom layout or hit-testing:
+Query per-glyph metrics from a `FontSystem` for custom layout or hit-testing. The methods live on `FontSystem` rather than on `FontFile` directly, because the system handles fallback resolution:
 
 ```csharp
-FontFile font = fs.GetFont("Arial", FontStyle.Regular);
+FontFile font = new FontFile("fonts/Arial.ttf");
 
-// Raw metrics for a codepoint at a given quality level.
-GlyphMetrics metrics = font.GetGlyphMetrics('A', FontQuality.Normal);
-// metrics.AdvanceWidth, metrics.LeftBearing, metrics.RightBearing,
-// metrics.Width, metrics.Height, metrics.YOffset
+// Metrics for a codepoint at a given pixel size.
+GlyphMetrics? metrics = fs.GetGlyphMetrics(font, 'A', pixelSize: 18f);
+if (metrics.HasValue)
+{
+    // metrics.Value.AdvanceWidth, .LeftSideBearing,
+    // .Width, .Height, .OffsetX, .OffsetY
+}
 
-// Kerning between two codepoints.
-float kern = font.GetKerning('A', 'V', pixelSize: 18f);
+// Kerning between two codepoints (returns the adjustment in pixels).
+float kern = fs.GetKerning(font, 'A', 'V', pixelSize: 18f);
 
 // Scaled vertical metrics (ascent, descent, line gap).
-(float ascent, float descent, float lineGap) = font.GetScaledVMetrics(pixelSize: 18f);
+fs.GetScaledVMetrics(font, pixelSize: 18f,
+    out float ascent, out float descent, out float lineGap);
 ```
 
-`GlyphMetrics` is a lightweight struct; all values are in pixel-space at the rasterisation quality you specify.
+`GlyphMetrics` is a lightweight struct; all values are in pixel-space at the supplied `pixelSize`.
 
 ## Atlas Management
 
