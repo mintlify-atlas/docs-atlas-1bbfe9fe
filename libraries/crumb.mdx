@@ -1,0 +1,343 @@
+---
+title: "Prowl.Crumb: Zero-Allocation Span-Based Tokenizer Engine"
+sidebarTitle: "Crumb"
+description: "Prowl.Crumb tokenizes ReadOnlySpan sources with zero allocation using frozen first-char dispatch tables, longest-match fixed tokens, and dynamic rules."
+---
+
+Prowl.Crumb is a zero-allocation lexer engine targeting .NET 10, designed for game DSLs, shader languages, configuration formats, and custom markup. The tokenizer operates directly over a `ReadOnlySpan<char>` using a `ref struct` cursor, so it lives on the stack and produces no managed heap pressure during the hot path. Fixed tokens (keywords and symbols) are compiled into first-character `FrozenDictionary` dispatch tables with longest-match semantics; dynamic rules for identifiers, numbers, strings, and custom syntax are delegates in registration order. There is no regex on the hot path, no virtual dispatch, and no boxing.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Crumb
+```
+
+## Design Principles
+
+<CardGroup cols={2}>
+  <Card title="Configuration over inheritance" icon="sliders">
+    Define your token grammar through a fluent builder. No base class to override, no abstract methods to implement.
+  </Card>
+  <Card title="Zero managed allocation" icon="bolt">
+    Tokens reference slices of the original source by offset and length. No substrings are created during tokenization.
+  </Card>
+  <Card title="Frozen dispatch" icon="table">
+    Keywords and symbols are indexed by first character using `FrozenDictionary` at compile time. Longest-match is O(1) per character regardless of how many fixed tokens you define.
+  </Card>
+  <Card title="Opaque blocks" icon="code">
+    Embed sublanguages (e.g., HLSL inside ShaderLab) as a single token without tokenizing their contents.
+  </Card>
+</CardGroup>
+
+## Defining Rules — TokenizerRules&lt;TKind&gt;
+
+`TokenizerRules<TKind>` is a fluent builder where `TKind` is your own `unmanaged, Enum` type. Call `.Compile()` explicitly or let it compile lazily on first use. The compiled rules are immutable and can be shared across any number of tokenizer instances.
+
+You must tell Crumb which two enum values represent end-of-file and error tokens. Both default to `default(TKind)` (the zero value) if not explicitly set.
+
+```csharp
+using Prowl.Crumb;
+
+enum TokenKind
+{
+    EndOfFile, Error,
+    Identifier, Number, String,
+    If, Else, While, Return,
+    Plus, Minus, Star, Slash,
+    Equals, EqualsEquals,
+    LParen, RParen, LBrace, RBrace,
+    Semicolon, Comma,
+}
+
+var rules = new TokenizerRules<TokenKind>()
+    .EndOfFile(TokenKind.EndOfFile)
+    .Error(TokenKind.Error)
+    .Whitespace(c => c is ' ' or '\t' or '\r' or '\n')
+    .Keyword("if",     TokenKind.If)
+    .Keyword("else",   TokenKind.Else)
+    .Keyword("while",  TokenKind.While)
+    .Keyword("return", TokenKind.Return)
+    .Symbol("==",  TokenKind.EqualsEquals)   // longest-match: wins over "="
+    .Symbol("=",   TokenKind.Equals)
+    .Symbol("+",   TokenKind.Plus)
+    .Symbol("-",   TokenKind.Minus)
+    .Symbol("*",   TokenKind.Star)
+    .Symbol("/",   TokenKind.Slash)
+    .Symbol("(",   TokenKind.LParen)
+    .Symbol(")",   TokenKind.RParen)
+    .Symbol("{",   TokenKind.LBrace)
+    .Symbol("}",   TokenKind.RBrace)
+    .Symbol(";",   TokenKind.Semicolon)
+    .Symbol(",",   TokenKind.Comma)
+    .Identifier(TokenKind.Identifier)
+    .Number(TokenKind.Number)
+    .String('"',   TokenKind.String)
+    .LineComment("//")
+    .Comment("/*", "*/")
+    .Compile();
+```
+
+### Available Rule Methods
+
+<ParamField body=".Whitespace(CharPredicate)" type="TokenizerRules&lt;TKind&gt;">
+  Characters matching the predicate are skipped automatically before every token. Common usage: `c => c is ' ' or '\t' or '\r' or '\n'`.
+</ParamField>
+
+<ParamField body=".Keyword(string text, TKind kind)" type="TokenizerRules&lt;TKind&gt;">
+  Matches the literal string only when not immediately followed by an identifier-continuation character, so `if` does not match inside `ifdef`. Dispatched by first character with longest-match semantics.
+</ParamField>
+
+<ParamField body=".Symbol(string text, TKind kind)" type="TokenizerRules&lt;TKind&gt;">
+  Matched literally. Multiple symbols sharing a prefix resolve via longest match: `===` wins over `==`, which wins over `=`.
+</ParamField>
+
+<ParamField body=".Identifier(TKind kind, CharPredicate? start, CharPredicate? continue)" type="TokenizerRules&lt;TKind&gt;">
+  Default start: letter or `_`. Default continuation: letter, digit, or `_`. Override either predicate to support custom identifier syntax.
+</ParamField>
+
+<ParamField body=".Number(TKind kind)" type="TokenizerRules&lt;TKind&gt;">
+  Covers integers, decimals, scientific notation (`1e10`, `2.5E-3`), and hexadecimal (`0xFF`).
+</ParamField>
+
+<ParamField body=".String(char quote, TKind kind, char escape)" type="TokenizerRules&lt;TKind&gt;">
+  Consumes a quoted string with backslash-escape handling. Default escape character is `\`. Unterminated strings consume to end of input.
+</ParamField>
+
+<ParamField body=".LineComment(string prefix)" type="TokenizerRules&lt;TKind&gt;">
+  Skips from the prefix to end of line. Pass a `TKind` overload to emit the comment as a token instead of discarding it.
+</ParamField>
+
+<ParamField body=".Comment(string open, string close)" type="TokenizerRules&lt;TKind&gt;">
+  Skips a delimited block. Pass a `TKind` overload to emit the block as a token.
+</ParamField>
+
+<ParamField body=".Block(string open, string close, TKind kind)" type="TokenizerRules&lt;TKind&gt;">
+  Opaque block: after the opening string matches, Crumb scans to the closing string and emits one token spanning the content between the delimiters. Delimiters are consumed but not included in the token. See [Opaque Blocks](#opaque-blocks).
+</ParamField>
+
+<ParamField body=".Rule(TokenRule&lt;TKind&gt; delegate)" type="TokenizerRules&lt;TKind&gt;">
+  Registers a fully custom rule. See [Custom Rules](#custom-rules).
+</ParamField>
+
+## Token&lt;TKind&gt;
+
+`Token<TKind>` is a `readonly struct` that references a slice of the source by position without copying text.
+
+```csharp
+public readonly struct Token<TKind>
+{
+    public readonly TKind Kind;
+    public readonly int   Start;    // byte offset in source
+    public readonly int   Length;
+    public readonly int   Line;     // one-based
+    public readonly int   Column;   // one-based
+    public int End => Start + Length;
+}
+```
+
+To read the text of a token without allocating a string, use the tokenizer's zero-copy `Slice` method:
+
+```csharp
+ReadOnlySpan<char> text = tokenizer.Slice(token);
+```
+
+## Tokenizer&lt;TKind&gt;
+
+`Tokenizer<TKind>` is a `ref struct` that holds the tokenization cursor. Construct it from a source span and compiled rules, then drive it manually or in a loop.
+
+```csharp
+var tokenizer = new Tokenizer<TokenKind>(sourceText, rules);
+
+// Consume the next token
+Token<TokenKind> tok = tokenizer.Next();
+
+// Look ahead without advancing
+Token<TokenKind> ahead = tokenizer.Peek();
+
+// Consume if the kind matches, otherwise leave cursor unchanged
+bool consumed = tokenizer.TryConsume(TokenKind.LBrace);
+
+// Consume and capture
+if (tokenizer.TryConsume(TokenKind.Number, out var num))
+{
+    var numText = tokenizer.Slice(num);
+}
+
+// Assert and consume — throws UnexpectedTokenException on mismatch
+Token<TokenKind> brace = tokenizer.Expect(TokenKind.LBrace);
+
+// State queries
+bool done          = tokenizer.IsAtEnd;
+ReadOnlySpan<char> rest = tokenizer.Remaining();
+```
+
+## Backtracking
+
+`TokenizerMark` captures the full cursor state. `Reset(mark)` restores it exactly, enabling recursive-descent alternatives.
+
+```csharp
+var mark = tokenizer.Mark();
+
+if (!TryParseMultiply(ref tokenizer, out var expr))
+{
+    tokenizer.Reset(mark); // rewind and try the next alternative
+    expr = ParsePrimary(ref tokenizer);
+}
+```
+
+## Resolution Order
+
+For every token, Crumb resolves in strict priority order:
+
+<Steps>
+  <Step title="Skip whitespace and trivia">
+    All characters matching the whitespace predicate are consumed silently. Skipped comments (no `TKind` argument) are also consumed here.
+  </Step>
+  <Step title="Fixed-token dispatch">
+    The current character is used as a key in the first-character `FrozenDictionary`. All fixed tokens starting with that character are checked with longest-match semantics. Keywords additionally verify a word boundary (no identifier-continuation character follows).
+  </Step>
+  <Step title="Dynamic rules">
+    Rules registered via `.Identifier()`, `.Number()`, `.String()`, `.LineComment()`, `.Comment()`, `.Block()`, and `.Rule()` are tried in registration order. The first rule that returns `true` wins.
+  </Step>
+  <Step title="Error token">
+    If no rule matched, a single-character error token of kind `Error` is emitted and the cursor advances by one. Callers can recover from error tokens rather than having the tokenizer throw.
+  </Step>
+</Steps>
+
+## Custom Rules
+
+`TokenRule<TKind>` is a delegate with signature `bool(ref Tokenizer<TKind>, out Token<TKind>)`. Return `true` and populate `token` to claim the match; return `false` and leave the cursor unchanged to pass to the next rule.
+
+```csharp
+// Custom rule: @Directive tokens (e.g., @include, @define)
+rules.Rule((ref Tokenizer<TokenKind> t, out Token<TokenKind> token) =>
+{
+    var src = t.Source;
+    int pos = t.Position;
+
+    if (pos >= src.Length || src[pos] != '@')
+    {
+        token = default;
+        return false;
+    }
+
+    int begin = pos;
+    int line   = t.Line;
+    int col    = t.Column;
+    pos++; // consume '@'
+
+    while (pos < src.Length && char.IsLetter(src[pos]))
+        pos++;
+
+    t.Advance(pos - begin);
+    token = t.CreateToken(TokenKind.Identifier, begin, line, col);
+    return true;
+});
+```
+
+Inside a custom rule you have access to: `t.Source`, `t.Position`, `t.Line`, `t.Column`, `t.Advance(count)`, and `t.CreateToken(kind, start, line, column)`.
+
+## Error Handling
+
+`Expect` throws `UnexpectedTokenException` when the next token does not match the expected kind:
+
+```csharp
+try
+{
+    var open = tokenizer.Expect(TokenKind.LBrace);
+}
+catch (UnexpectedTokenException ex)
+{
+    Console.Error.WriteLine(
+        $"Expected {ex.Expected}, got {ex.Actual} at {ex.Line}:{ex.Column}");
+}
+```
+
+<ParamField body="UnexpectedTokenException.Expected" type="TKind">
+  The kind that was required.
+</ParamField>
+
+<ParamField body="UnexpectedTokenException.Actual" type="TKind">
+  The kind that was found.
+</ParamField>
+
+<ParamField body="UnexpectedTokenException.Line" type="int">
+  One-based source line of the unexpected token.
+</ParamField>
+
+<ParamField body="UnexpectedTokenException.Column" type="int">
+  One-based source column of the unexpected token.
+</ParamField>
+
+## Opaque Blocks
+
+`.Block(open, close, kind)` embeds a sublanguage as a single token without recursively tokenizing its contents. After the opening string matches, Crumb scans forward to the closing string and emits one token whose text spans everything between the delimiters.
+
+```csharp
+// ShaderLab grammar: HLSL and GLSL blocks are opaque
+var rules = new TokenizerRules<ShaderTokenKind>()
+    .Block("HLSLPROGRAM", "ENDHLSL",   ShaderTokenKind.HlslSource)
+    .Block("GLSLPROGRAM", "ENDGLSL",   ShaderTokenKind.GlslSource)
+    // … other shader rules
+    .Compile();
+```
+
+The emitted token is a zero-copy span over the original source, so you can feed it directly to a secondary HLSL tokenizer without any intermediate allocation.
+
+## Complete Example
+
+The following defines a complete grammar for a simple expression language and tokenizes an input string:
+
+```csharp
+using Prowl.Crumb;
+
+enum Tok
+{
+    Eof, Error,
+    Ident, Number, Str,
+    Let, If, Else,
+    Plus, Minus, Star, Slash,
+    Eq, EqEq, Bang, BangEq,
+    Lt, LtEq, Gt, GtEq,
+    LParen, RParen, LBrace, RBrace,
+    Semi, Comma, Colon,
+}
+
+var rules = new TokenizerRules<Tok>()
+    .EndOfFile(Tok.Eof)
+    .Error(Tok.Error)
+    .Whitespace(char.IsWhiteSpace)
+    .Keyword("let",  Tok.Let)
+    .Keyword("if",   Tok.If)
+    .Keyword("else", Tok.Else)
+    .Symbol("==", Tok.EqEq).Symbol("!=", Tok.BangEq)
+    .Symbol("<=", Tok.LtEq).Symbol(">=", Tok.GtEq)
+    .Symbol("=",  Tok.Eq)
+    .Symbol("+",  Tok.Plus).Symbol("-", Tok.Minus)
+    .Symbol("*",  Tok.Star).Symbol("/", Tok.Slash)
+    .Symbol("!",  Tok.Bang)
+    .Symbol("<",  Tok.Lt).Symbol(">", Tok.Gt)
+    .Symbol("(",  Tok.LParen).Symbol(")", Tok.RParen)
+    .Symbol("{",  Tok.LBrace).Symbol("}", Tok.RBrace)
+    .Symbol(";",  Tok.Semi).Symbol(",", Tok.Comma)
+    .Symbol(":",  Tok.Colon)
+    .Identifier(Tok.Ident)
+    .Number(Tok.Number)
+    .String('"', Tok.Str)
+    .LineComment("//")
+    .Compile();
+
+ReadOnlySpan<char> source = "let x = 42; if x >= 10 { \"hello\" }";
+var tokenizer = new Tokenizer<Tok>(source, rules);
+
+while (true)
+{
+    var tok = tokenizer.Next();
+    Console.WriteLine($"[{tok.Line}:{tok.Column}] {tok.Kind,-10} '{tokenizer.Slice(tok)}'");
+    if (tok.Kind == Tok.Eof) break;
+}
+```
+
+<Tip>
+Because `Tokenizer<TKind>` is a `ref struct`, it cannot be stored in a field, captured in a lambda, or used inside an `async` method. Pass it by `ref` to helper parsing methods.
+</Tip>

@@ -1,0 +1,305 @@
+---
+title: "Prowl.Echo: High-Performance .NET Serialization with Source Generation"
+sidebarTitle: "Echo"
+description: "Prowl.Echo serializes to an intermediate EchoObject tree, then writes Binary, JSON, XML, YAML, or BSON — with Roslyn source generation that outperforms System.Text.Json."
+---
+
+Prowl.Echo is a high-performance, flexible serialization library that converts your objects into an intermediate `EchoObject` tree before writing to any supported file format. This two-stage design lets you inspect, transform, or diff data before it hits disk or the network. A Roslyn source generator can emit fully-typed, zero-reflection serialization code at compile time, making Echo faster than `System.Text.Json` and `Newtonsoft.Json` on both serialize and deserialize benchmarks — while still handling complex scenarios like circular references, polymorphism, and GUID-based external asset references.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Echo
+```
+
+## Basic Serialization
+
+Every Echo workflow starts with `Serializer.Serialize`, which returns an `EchoObject`. You can then write that object to any supported format, or keep it in memory for inspection and patching. `Serializer.Deserialize<T>` reverses the process.
+
+```csharp
+using Prowl.Echo;
+
+// Serialize an object into an EchoObject tree
+var myObject = new MyClass { Value = 42, Name = "Prowl" };
+EchoObject echo = Serializer.Serialize(myObject);
+
+// Deserialize back to a concrete type
+var restored = Serializer.Deserialize<MyClass>(echo);
+```
+
+The `EchoType` enum describes every node in the tree:
+
+| Value | Description |
+|---|---|
+| `Null` | Null reference |
+| `Byte`, `sByte`, `Short`, `UShort`, `Int`, `UInt`, `Long`, `ULong` | Integer primitives |
+| `Float`, `Double`, `Decimal` | Floating-point primitives |
+| `String` | UTF-8 text |
+| `Bool` | Boolean |
+| `ByteArray` | Raw byte buffer |
+| `Compound` | Key-value dictionary of `EchoObject` entries |
+| `List` | Ordered list of `EchoObject` entries |
+
+## File Formats
+
+Echo separates the serialization stage from the encoding stage. Once you have an `EchoObject`, choose any format via its singleton `Instance`:
+
+| Format class | Type | Notes |
+|---|---|---|
+| `EchoBinaryFormat` | Binary | Compact; supports `BinaryEncodingMode` (fixed/LEB128) |
+| `EchoTextFormat` | Text | Echo's own human-readable text syntax |
+| `JsonFileFormat` | Text | Standard JSON |
+| `XmlFileFormat` | Text | Standard XML |
+| `YamlFileFormat` | Text | YAML 1.2 |
+| `BsonFileFormat` | Binary | MongoDB-compatible BSON |
+
+All formats implement `IFileFormat`, which provides `WriteToString`, `ReadFromString`, `WriteToBytes`, `ReadFromBytes`, `WriteToFile`, and `ReadFromFile` extension methods.
+
+```csharp
+// Write to JSON
+EchoObject echo = Serializer.Serialize(player);
+string json = JsonFileFormat.Instance.WriteToString(echo);
+
+// Read back from JSON
+EchoObject fromJson = JsonFileFormat.Instance.ReadFromString(json);
+var player2 = Serializer.Deserialize<Player>(fromJson);
+```
+
+## Source Generation
+
+Adding `[GenerateSerializer]` to a `partial` class or struct instructs the Roslyn generator to emit an optimized `ISerializable` implementation at compile time. The generated code inlines primitive construction, enum handling, and common collection serialization, bypassing the reflection pipeline entirely.
+
+```csharp
+// Before: reflection-based (still works, just slower)
+public class Player
+{
+    public string Name = "Hero";
+    public int Health = 100;
+    public List<string> Inventory = new();
+}
+
+// After: source-generated, zero-reflection hot path
+[GenerateSerializer]
+public partial class Player
+{
+    public string Name = "Hero";
+    public int Health = 100;
+    public List<string> Inventory = new();
+}
+
+// Usage is identical — the speed improvement is automatic
+var player = new Player { Name = "Hero", Health = 200 };
+EchoObject echo = Serializer.Serialize(player);
+var restored = Serializer.Deserialize<Player>(echo);
+```
+
+<Tip>
+Source generation benchmarks show Echo deserializing **5.56× faster** than `System.Text.Json` and **7.84× faster** than `Newtonsoft.Json` on complex object graphs with nested objects, arrays, and dictionaries.
+</Tip>
+
+## Fixed Echo Structure
+
+`[FixedEchoStructure]` tells the serializer that a type has a stable, never-changing field layout. Instead of writing field names, the compact positional format is used — ideal for networking packets or small value types like vectors and colors.
+
+```csharp
+[GenerateSerializer]
+[FixedEchoStructure]
+public partial struct NetworkPacket
+{
+    public uint Sequence;
+    public float Timestamp;
+    public byte Flags;
+}
+```
+
+<Warning>
+Never add, remove, or reorder fields in a `[FixedEchoStructure]` type once it has been persisted or transmitted. Positional serialization has no field-name fallback for schema migration.
+</Warning>
+
+## Serialization Attributes
+
+Fine-tune what gets serialized with these field-level attributes:
+
+| Attribute | Effect |
+|---|---|
+| `[SerializeField]` | Force serialization of a private or non-public field |
+| `[SerializeIgnore]` | Exclude a public field from serialization |
+| `[SerializeIf("memberName")]` | Serialize the field only when the named bool member returns `true` |
+| `[FormerlySerializedAs("oldName")]` | Map an old field name to the current field for backwards compatibility |
+| `[IgnoreOnNull]` | Skip writing the field entirely when its value is `null` |
+
+```csharp
+public class GameData
+{
+    [FormerlySerializedAs("hp")]
+    public int Health = 100;
+
+    [IgnoreOnNull]
+    public string? SessionId = null;
+
+    [SerializeIf("IsDebugBuild")]
+    public string DebugTrace = "";
+
+    public bool IsDebugBuild => false;
+}
+```
+
+## ISerializable Interface
+
+For complete manual control over serialization, implement `ISerializable`. This lets you read and write any `EchoObject` structure you choose, and gives access to the current `SerializationContext` for resolving external references or controlling type embedding.
+
+```csharp
+public class CustomObject : ISerializable
+{
+    public int Value = 42;
+    public string Text = "Echo";
+
+    public void Serialize(ref EchoObject compound, SerializationContext ctx)
+    {
+        compound.Add("value", new EchoObject(Value));
+        compound.Add("text", new EchoObject(Text));
+    }
+
+    public void Deserialize(EchoObject tag, SerializationContext ctx)
+    {
+        Value = tag.Get("value").IntValue;
+        Text = tag.Get("text").StringValue;
+    }
+}
+```
+
+## Callbacks
+
+Implement `ISerializationCallbackReceiver` to hook into the serialization lifecycle without taking over the entire process. Both methods are called automatically by the `Serializer`.
+
+```csharp
+public class Entity : ISerializationCallbackReceiver
+{
+    public string Name = "";
+    private string _cachedLower = "";
+
+    public void OnBeforeSerialize()
+    {
+        // Called just before fields are written — sanitize data here
+    }
+
+    public void OnAfterDeserialize()
+    {
+        // Called after fields are populated — rebuild derived state
+        _cachedLower = Name.ToLowerInvariant();
+    }
+}
+```
+
+## External References & Polymorphism
+
+`IExternalReferenceResolver` lets Echo serialize references to assets stored outside the data graph (e.g. textures identified by GUID). Implement `TrySerialize` and `TryResolve` to convert between live objects and stable identifiers.
+
+`TypeEnvelope` wraps any `EchoObject` with optional type information for polymorphic deserialization. The `TypeMode` enum on `SerializationContext` controls when type info is embedded:
+
+| `TypeMode` | Behaviour |
+|---|---|
+| `Auto` | Embed type only when the runtime type differs from the declared type |
+| `Always` | Always embed the full assembly-qualified type name |
+| `Never` | Never embed type info (requires exact declared types at deserialization) |
+
+```csharp
+var ctx = new SerializationContext(TypeMode.Auto)
+{
+    ExternalReferences = myAssetResolver
+};
+
+EchoObject echo = Serializer.Serialize(gameObject, ctx);
+```
+
+## Deep Cloning
+
+Echo includes a full deep-clone system through the `Cloner` static class and the `CloneExtensions` convenience methods.
+
+```csharp
+// Clone an object graph
+Player copy = Cloner.Clone(player);
+
+// Extension method syntax
+Player copy2 = player.DeepClone();
+
+// Copy into an existing instance
+Cloner.CopyTo(source, target);
+
+// Clone a collection
+List<Player> copies = Cloner.CloneAll(players);
+```
+
+Control cloning behavior with attributes:
+
+| Attribute / Type | Effect |
+|---|---|
+| `[CloneBehavior(CloneBehavior.X)]` | Override per-type clone strategy (`Deep`, `Shallow`, `Reference`, `Skip`) |
+| `[CloneField(CloneFieldFlags.X)]` | Override cloning for a specific field |
+| `[ManuallyCloned]` | Mark a type as handling its own cloning via `ICloneExplicit` |
+| `ICloneExplicit` | Manual clone implementation; receives a `CloneContext` |
+| `ICloneLateFormat` | Deferred clone for types that need two-phase construction |
+| `CloneContext` | Carries clone state and handles circular-reference tracking |
+
+## EchoObject API
+
+`EchoObject` is the central data node. Compound and list nodes offer collection-like access, and all nodes expose typed value accessors.
+
+```csharp
+// Binary round-trip
+var original = new LevelData { Name = "Level 1", EnemyCount = 42 };
+EchoObject echo = Serializer.Serialize(original);
+
+// Write to binary file
+echo.WriteToBinary(new FileInfo("level.bin"));
+
+// Read back from binary file
+EchoObject loaded = EchoObject.ReadFromBinary(new FileInfo("level.bin"));
+var restored = Serializer.Deserialize<LevelData>(loaded);
+
+// Manually construct compound nodes
+var compound = EchoObject.NewCompound();
+compound.Add("score", new EchoObject(9999));
+compound.Add("name", new EchoObject("Player One"));
+
+// Manually construct list nodes
+var list = EchoObject.NewList();
+list.Add(new EchoObject(1));
+list.Add(new EchoObject(2));
+
+// Delta support for network sync
+EchoObject delta = EchoObject.CreateDelta(previous, current);
+EchoObject patched = EchoObject.ApplyDelta(baseline, delta);
+
+// String round-trip (Echo text format)
+string text = echo.WriteToString();
+EchoObject fromText = EchoObject.ReadFromString(text);
+```
+
+<Accordion title="Performance Benchmark Results">
+Benchmarks run with `[GenerateSerializer]` and `[FixedEchoStructure]` on a complex object graph (20 nested objects, 100-element arrays, 50-entry dictionaries):
+
+```
+Serialize:
+  MessagePack       0.0297 ms  (1.64× faster than Echo)
+  Echo              0.0487 ms
+  System.Text.Json  0.0708 ms  (2.39× slower)
+  Newtonsoft.Json   0.1040 ms  (3.51× slower)
+
+Deserialize:
+  Echo              0.0200 ms
+  MessagePack       0.0470 ms  (2.35× slower)
+  System.Text.Json  0.1113 ms  (5.56× slower)
+  Newtonsoft.Json   0.1570 ms  (7.84× slower)
+
+Round-trip:
+  Echo              0.0644 ms
+  MessagePack       0.0714 ms  (1.11× slower)
+  System.Text.Json  0.1776 ms  (2.76× slower)
+  Newtonsoft.Json   0.2533 ms  (3.93× slower)
+```
+</Accordion>
+
+<Note>
+Echo only serializes **fields**, not properties. This is by design — it mirrors Unity's serialization model and keeps the serialized contract explicit and stable.
+</Note>

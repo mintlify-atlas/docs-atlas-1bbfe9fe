@@ -1,0 +1,262 @@
+---
+title: "Prowl.Drift: Lightweight 2D Rigid Body Physics Engine"
+sidebarTitle: "Drift"
+description: "Prowl.Drift is a pure-C# 2D physics engine with SAT collision detection, spatial hashing, broad/narrow phase, and eight joint constraint types."
+---
+
+Prowl.Drift is an open-source, MIT-licensed 2D rigid body physics engine built entirely in C# on top of `System.Numerics`. It provides rigid body dynamics for static, kinematic, and dynamic bodies; shape-based collision detection using a spatial-hash broad phase and SAT (Separating Axis Theorem) narrow phase; a contact manifold solver with warm starting; and a full eight-type joint system for constraints ranging from distance springs to interactive mouse joints. Drift is cross-platform, AOT-compatible, and designed to integrate in minutes.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Drift
+```
+
+## Creating a Space
+
+A `Space` is the top-level container for all physics objects. Create one per simulation world, set gravity, then drive it by calling `Step` each frame.
+
+```csharp
+using Prowl.Drift;
+using System.Numerics;
+
+var space = new Space();
+space.Gravity = new Vector2(0, -9.81f);
+space.Damping  = 0.01f;                 // global linear damping coefficient
+```
+
+`Space.Step(float dt, int velIterations, int posIterations, bool warmStarting)` advances the simulation by `dt` seconds. Higher iteration counts improve constraint accuracy at the cost of CPU time; 8 velocity + 3 position iterations is a solid default for 60 Hz gameplay.
+
+```csharp
+// Typical 60 Hz game loop
+space.Step(1f / 60f, velIterations: 8, posIterations: 3, warmStarting: true);
+```
+
+The `Space` also exposes `Bodies`, `Joints`, and `Contacts` as read-only lists for inspection and rendering.
+
+## Bodies
+
+`Body` represents a rigid body in the simulation. Construct one with a `BodyType` and a starting position, add shapes, then register it with the space.
+
+```csharp
+// Static body — immovable; ideal for ground and walls
+var ground = new Body(Body.BodyType.Static, new Vector2(400, 580));
+space.AddBody(ground);
+
+// Kinematic body — moves at programmer-controlled velocity, unaffected by forces
+var platform = new Body(Body.BodyType.Kinematic, new Vector2(200, 300));
+platform.LinearVelocity = new Vector2(50, 0);
+space.AddBody(platform);
+
+// Dynamic body — fully simulated by forces, gravity, and constraints
+var box = new Body(Body.BodyType.Dynamic, new Vector2(400, 100));
+space.AddBody(box);
+```
+
+Key `Body` properties:
+
+| Property | Description |
+|---|---|
+| `Type` | `Static`, `Kinematic`, or `Dynamic` |
+| `Position` | World-space position of the center of mass |
+| `LinearVelocity` | Linear velocity vector |
+| `Angle` | Orientation in radians |
+| `AngularVelocity` | Angular velocity in rad/s |
+| `Mass`, `MassInv` | Computed from shape density |
+| `Inertia`, `InertiaInv` | Moment of inertia |
+| `FixedRotation` | When true, prevents angular motion |
+| `LinearDamping`, `AngularDamping` | Per-body velocity decay |
+
+To apply forces: `body.ApplyForceToCenter(force)`. To remove: `space.RemoveBody(body)`.
+
+## Shapes
+
+Shapes define the collision geometry of a body. Multiple shapes can be attached to a single body to form compound colliders. All shapes expose `Friction`, `Elasticity` (restitution), and `Density`.
+
+```csharp
+// Box shape (offset x, y, width, height)
+var boxShape = ShapePoly.CreateBox(0, 0, 64, 32);
+boxShape.Friction   = 0.7f;
+boxShape.Elasticity = 0.2f;
+boxShape.Density    = 1.0f;
+box.AddShape(boxShape);
+
+// Circle shape (offset x, y, radius)
+var circle = new ShapeCircle(0, 0, 24f);
+dynamicBody.AddShape(circle);
+
+// Convex polygon from custom vertices
+var verts = new Vector2[]
+{
+    new(-16, -16), new(16, -16), new(16, 16), new(-16, 16)
+};
+var poly = new ShapePoly(verts);
+body.AddShape(poly);
+
+// Line segment with rounded thickness (for ramps, rails)
+var seg = new ShapeSegment(new Vector2(-100, 0), new Vector2(100, 0), thickness: 2f);
+ground.AddShape(seg);
+```
+
+<Note>
+`ShapePoly` requires a convex vertex list. If you need concave geometry, decompose it into multiple convex shapes and attach them all to the same body.
+</Note>
+
+## Complete Simulation Example
+
+Here is a full working simulation that creates a static floor, drops a dynamic box, and runs a fixed-timestep loop:
+
+```csharp
+using Prowl.Drift;
+using System.Numerics;
+
+// --- Build world ---
+var space = new Space();
+space.Gravity = new Vector2(0, -500f);
+
+// Static ground plane
+var ground = new Body(Body.BodyType.Static, new Vector2(400, 580));
+ground.AddShape(ShapePoly.CreateBox(0, 0, 800, 20));
+space.AddBody(ground);
+
+// Dynamic box starting above the ground
+var box = new Body(Body.BodyType.Dynamic, new Vector2(400, 100));
+box.AddShape(ShapePoly.CreateBox(0, 0, 48, 48));
+space.AddBody(box);
+
+// Apply a side impulse at spawn
+box.ApplyForceToCenter(new Vector2(200, 0));
+
+// --- Simulate 3 seconds at 60 Hz ---
+for (int i = 0; i < 180; i++)
+{
+    space.Step(1f / 60f, velIterations: 8, posIterations: 3, warmStarting: true);
+    Console.WriteLine($"t={i/60f:F2}s  pos={box.Position}  angle={box.Angle:F2}rad");
+}
+```
+
+## Joints
+
+Drift provides eight joint types. Create a joint, set its properties, and register it with `space.AddJoint`. Use `space.RemoveJoint` to destroy it at runtime.
+
+<CardGroup cols={2}>
+  <Card title="DistanceJoint" icon="arrows-left-right">
+    Maintains a fixed distance between two anchor points. Good for ropes made of rigid links.
+  </Card>
+  <Card title="RevoluteJoint" icon="circle-dot">
+    Pin joint: allows free rotation around a shared world anchor. Use for wheels, hinges, and ragdoll limbs.
+  </Card>
+  <Card title="PrismaticJoint" icon="arrows-up-down">
+    Slider joint: constrains bodies to translate along a shared axis only.
+  </Card>
+  <Card title="WeldJoint" icon="link">
+    Rigid connection: locks two bodies together as if welded. Useful for breakable joints.
+  </Card>
+  <Card title="WheelJoint" icon="gear">
+    Combines a revolute motor with a spring suspension along a local axis — ideal for vehicle wheels.
+  </Card>
+  <Card title="RopeJoint" icon="wave-square">
+    Maximum-distance constraint; the bodies can approach but not move farther apart than the rope length.
+  </Card>
+  <Card title="AngleJoint" icon="angle-right">
+    Constrains the relative angle between two bodies to a target value.
+  </Card>
+  <Card title="MouseJoint" icon="computer-mouse">
+    Pulls one body toward a target world position. Perfect for click-and-drag interactions.
+  </Card>
+</CardGroup>
+
+```csharp
+// Revolute joint — hinge two bodies around a shared world-space anchor
+var hinge = new RevoluteJoint(bodyA, bodyB, worldAnchor: new Vector2(200, 300));
+hinge.CollideConnected = false;
+space.AddJoint(hinge);
+
+// Distance joint — maintain a 150-unit distance between two local anchors
+var spring = new DistanceJoint(
+    bodyA, bodyB,
+    anchorA: new Vector2(0, 10),
+    anchorB: new Vector2(0, -10));
+// spring.Length is auto-computed from the current body positions
+
+// Rope joint — maximum distance constraint
+var rope = new RopeJoint(
+    bodyA, bodyB,
+    anchorA: Vector2.Zero,
+    anchorB: Vector2.Zero);
+
+// Weld joint — rigid bond at a world anchor
+var weld = new WeldJoint(bodyA, bodyB, worldAnchor: new Vector2(100, 100));
+space.AddJoint(weld);
+
+// Mouse joint — drag bodyA toward a screen-space point
+var drag = new MouseJoint(bodyA, bodyB, worldTarget: mousePos);
+space.AddJoint(drag);
+// Update each frame:
+drag.Target = currentMousePos;
+```
+
+All joints share `Body1`, `Body2`, `Space`, and `CollideConnected` (whether the connected bodies collide with each other).
+
+## Raycasting
+
+Cast a `Ray` through the space to find the first or all bodies it intersects. `RaycastHit` provides the hit body, shape, contact point, surface normal, and distance.
+
+```csharp
+var ray = new Ray(
+    origin:      new Vector2(0, 300),
+    direction:   new Vector2(1, 0),
+    maxDistance: 800f);
+
+// First hit only
+RaycastHit hit = space.Raycast(ray, ignoreBody: playerBody);
+if (hit.Hit)
+    Console.WriteLine($"Hit {hit.Body} at {hit.Point}, dist={hit.Distance:F1}");
+
+// All hits along the ray
+List<RaycastHit> hits = space.RaycastAll(ray);
+foreach (var h in hits)
+    Console.WriteLine($"  {h.Body} normal={h.Normal}");
+```
+
+`Ray` fields: `Origin` (`Vector2`), `Direction` (`Vector2`, normalized automatically), `MaxDistance`. `RaycastHit` fields: `Hit`, `Distance`, `Point`, `Normal`, `Body`, `Shape`.
+
+## Spatial Hash
+
+The `SpatialHash<T>` broad phase is used internally by `Space` to quickly find candidate body pairs for narrow-phase collision testing. You can also use it directly for non-physics spatial queries:
+
+```csharp
+var grid = new SpatialHash<GameObject>(cellSize: 64f);
+grid.Insert(obj, bounds);
+
+var candidates = new List<GameObject>();
+grid.Query(queryBounds, candidates);
+```
+
+## Collision Callbacks
+
+Subscribe to collision events through `Space.Contacts`. The `ContactSolver` holds the resolved contact manifold for each touching pair; `Contact` carries the normal, penetration depth, and impulse applied.
+
+```csharp
+// Inspect active contacts after each step
+foreach (ContactSolver solver in space.Contacts)
+{
+    Body a = solver.Body1;
+    Body b = solver.Body2;
+    // solver.Contacts contains the individual contact points
+}
+```
+
+## Utility Classes
+
+<CardGroup cols={3}>
+  <Card title="Collision" icon="shield-halved">
+    Static helper for SAT overlap tests and contact manifold generation between arbitrary shape pairs.
+  </Card>
+  <Card title="Geometry" icon="shapes">
+    Convex hull computation, polygon area/centroid, and closest-point queries.
+  </Card>
+  <Card title="MathUtil" icon="calculator">
+    Angle normalization, vector cross products, and other 2D math helpers not in `System.Numerics`.
+  </Card>
+</CardGroup>

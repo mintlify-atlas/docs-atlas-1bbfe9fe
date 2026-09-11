@@ -1,0 +1,458 @@
+---
+title: "Prowl.Scaffold: Zero-Allocation Incremental UI Layout Engine"
+sidebarTitle: "Scaffold"
+description: "Prowl.Scaffold is a renderer-agnostic, allocation-free layout engine that solves box geometry incrementally, dirtying only affected nodes on each update."
+---
+
+Prowl.Scaffold is a persistent, renderer-agnostic layout engine that owns a tree of boxes and solves their geometry. It draws nothing, knows nothing about fonts or colors, and carries no dependency on any graphics API — its only job is to produce `Rect` values from a tree of `Style` descriptors and a viewport size. The tree lives between frames: `SetStyle`, `Create`, `Remove`, and `PlaceAfter` mark only the directly affected node and its ancestors dirty, so a clean subtree is reused in full. In steady state — when no styles changed — the entire layout pass is O(1). Steady-state layout also allocates zero managed bytes, making Scaffold suitable for game update loops where allocation budgets are tight. Prowl.Paper uses Scaffold as its underlying layout engine.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Scaffold
+```
+
+## Creating a LayoutTree
+
+`LayoutTree` is the root object. Construct it once and hold it for the lifetime of the UI.
+
+```csharp
+using Prowl.Scaffold;
+
+// Default capacity of 128 — grows automatically as nodes are added
+var tree = new LayoutTree();
+
+// Pre-allocate for a known upper bound (avoids the first resize)
+var tree = new LayoutTree(capacity: 1024);
+
+// Explicit reserve call (can be called at any time outside of Layout)
+tree.Reserve(2048);
+```
+
+<ParamField path="capacity" type="int" default="128">
+  Initial node storage. Storage grows automatically when exceeded; `Reserve` lets you pre-allocate to avoid that growth.
+</ParamField>
+
+`tree.Count` is the current live-node count. `tree.Capacity` is the current storage size.
+
+---
+
+## NodeId — Opaque Handles
+
+`NodeId` is an opaque, owner- and generation-checked handle to a node in a specific tree. Default `NodeId` is invalid. Handles are stable across frames as long as the node is alive.
+
+```csharp
+// Create a root node (no parent)
+NodeId root = tree.Create(Style.Default with
+{
+    Layout = LayoutMode.Column,
+    Gap    = 8,
+    Width  = Length.Stretch(),
+    Height = Length.Stretch(),
+});
+
+// Create a child under root
+NodeId sidebar = tree.Create(Style.Default with
+{
+    Width  = 240,
+    Height = Length.Stretch(),
+}, parent: root);
+
+// Remove a node (and detaches its children)
+tree.Remove(sidebar);
+
+// Check whether a handle is still valid
+bool alive = tree.IsAlive(sidebar);
+```
+
+<Note>
+`NodeId` carries an internal owner token and generation counter. Passing a `NodeId` from one `LayoutTree` to a different `LayoutTree` instance, or using a handle after `Remove`, throws an `ArgumentException`.
+</Note>
+
+---
+
+## Style
+
+`Style` is an immutable `readonly record struct`. Use `Style.Default` as your starting point and apply `with`-expressions to customize individual properties. `default(Style)` is a zero-sized box — always start from `Style.Default`.
+
+```csharp
+var panelStyle = Style.Default with
+{
+    Layout     = LayoutMode.Column,
+    Width      = Length.Stretch(),
+    Height     = Length.Stretch(),
+    Padding    = new LengthEdges(16),
+    Gap        = 12,
+    AlignItems = Align.Stretch,
+};
+
+var buttonStyle = Style.Default with
+{
+    Width      = 120,
+    Height     = 40,
+    Margin     = new LengthEdges(4),
+};
+```
+
+### Style Properties
+
+<Accordion title="All Style Fields">
+
+| Property | Type | Description |
+|---|---|---|
+| `Width` / `Height` | `Length` | Element dimensions |
+| `MinWidth` / `MinHeight` | `Length` | Lower bound on resolved size |
+| `MaxWidth` / `MaxHeight` | `Length` | Upper bound; `float.MaxValue` by default |
+| `Padding` | `LengthEdges` | Insets the content box |
+| `Margin` | `LengthEdges` | External spacing; grow-weight margin becomes a flexible spacer |
+| `Layout` | `LayoutMode` | `Column`, `Row`, `Overlay`, `Grid` |
+| `AlignItems` | `Align` | Cross-axis alignment for children |
+| `AlignSelf` | `Align?` | Override for this element's own cross-axis placement |
+| `Justify` | `Justify` | Main-axis distribution of children |
+| `Gap` | `float` | Space between children along the main axis |
+| `LineGap` | `float` | Space between wrapped lines |
+| `Wrap` | `bool` | Enable multi-line wrapping |
+| `Reverse` | `bool` | Reverse child flow order |
+| `Hidden` | `bool` | Exclude from layout; `GetWorldRect` returns zero rect |
+| `Position` | `Position` | `Flow` (participates in parent) or `Absolute` |
+| `Left/Top/Right/Bottom` | `float?` | Absolute anchors (only used when `Position = Absolute`) |
+| `AspectRatio` | `float` | Width÷Height; derives an auto axis from a definite one; 0 disables |
+| `GridColumns` | `int` | Number of equal-width columns (Grid mode only) |
+
+</Accordion>
+
+---
+
+## Length
+
+`Length` is a composite dimension unit that combines pixel, percentage, flex-grow, auto-content, and shrink weights into a single value.
+
+```csharp
+// Pixels (also: implicit cast from float/int)
+Length w = Length.Pixels(200);
+Length w = 200;               // implicit
+
+// Percentage of parent content area
+Length w = Length.Percentage(50);          // 50%
+Length w = Length.Percentage(100, -16);    // 100% minus 16px
+
+// Flex grow — shares surplus with other Stretch siblings
+Length w = Length.Stretch();              // factor = 1
+Length w = Length.Stretch(2f);           // gets 2× the share of a Stretch(1)
+
+// Intrinsic content size (size to children / measure callback)
+Length h = Length.Auto;
+
+// Shrinkable — participates in flex shrink when overflowing
+Length w = Length.Stretch().Shrinkable(1f);
+```
+
+`LengthEdges` holds a `Length` per side (`Left`, `Top`, `Right`, `Bottom`) with convenience constructors for `(all)` and `(horizontal, vertical)`.
+
+---
+
+## Layout Modes
+
+<Tabs>
+  <Tab title="Column">
+    Children stack vertically. The main axis is Y; the cross axis is X. This is the default.
+    ```csharp
+    Style.Default with { Layout = LayoutMode.Column, Gap = 8 }
+    ```
+  </Tab>
+  <Tab title="Row">
+    Children stack horizontally. The main axis is X; the cross axis is Y.
+    ```csharp
+    Style.Default with { Layout = LayoutMode.Row, Gap = 8 }
+    ```
+  </Tab>
+  <Tab title="Overlay">
+    All children share one content box — they stack in z-order rather than along an axis. Useful for layered panels.
+    ```csharp
+    Style.Default with { Layout = LayoutMode.Overlay }
+    ```
+  </Tab>
+  <Tab title="Grid">
+    Equal-width columns; rows size to their tallest item. Not CSS grid — no track definitions or column spans.
+    ```csharp
+    Style.Default with { Layout = LayoutMode.Grid, GridColumns = 3, Gap = 12 }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Alignment
+
+<CardGroup cols={2}>
+  <Card title="Align" icon="align-center">
+    `Start` · `Center` · `End` · `Stretch`
+
+    Used by `AlignItems` (container → children) and `AlignSelf` (child override). `Stretch` expands the child to fill the container's cross-axis; an empty stretch spacer cannot inflate an auto-sized container.
+  </Card>
+  <Card title="Justify" icon="table-columns">
+    `Start` · `Center` · `End` · `SpaceBetween` · `SpaceAround` · `SpaceEvenly`
+
+    Used by `Justify` to distribute children along the main axis after flex sizing.
+  </Card>
+</CardGroup>
+
+<ParamField path="Position.Flow" type="Position">
+  The node participates in its parent's normal layout flow (default).
+</ParamField>
+<ParamField path="Position.Absolute" type="Position">
+  The node is positioned by `Left`/`Top`/`Right`/`Bottom` anchors relative to the parent's content box and does not consume space in the flow.
+</ParamField>
+
+---
+
+## Running Layout
+
+`SetStyle` updates a node's style and marks the dirty path. Calling it with the exact same style as the current one is a no-op — rebuilding styles each frame costs nothing when values did not change.
+
+```csharp
+// Update a style (dirty-tracks automatically)
+tree.SetStyle(sidebar, tree.GetStyle(sidebar) with { Width = 280 });
+
+// Run layout — returns LayoutStatistics for the pass
+LayoutStatistics stats = tree.Layout(root, new Size(1280, 720));
+```
+
+`Layout` propagates dirty flags down the affected branches, runs the measure pass (intrinsic content sizing), and then the arrange pass (box geometry). Clean subtrees are skipped entirely. If the root style is clean and the viewport did not change, the entire call is O(1).
+
+<Warning>
+Layout is not transactional. If a `MeasureContent` callback throws, do not read geometry results until a subsequent `Layout` call succeeds.
+</Warning>
+
+---
+
+## Reading Results
+
+All geometry results are available after a successful `Layout` call.
+
+```csharp
+// Parent-local rectangle (origin relative to parent's content box)
+Rect local = tree.GetRect(sidebar);
+
+// World rectangle (origin relative to the root)
+// O(depth) — composes origins by walking up the ancestor chain
+Rect world = tree.GetWorldRect(sidebar);
+
+// Bulk copy — zero allocation, O(subtree size + depth)
+// Allocate the buffer once, outside the hot path
+var buffer = new LayoutResult[tree.Count];
+int written = tree.CopyWorldRects(root, buffer);
+
+for (int i = 0; i < written; i++)
+{
+    NodeId node      = buffer[i].Node;
+    Rect   worldRect = buffer[i].WorldRect;
+    // pass to renderer...
+}
+```
+
+`CopyWorldRects` writes results in **parent-first hierarchy order** (sibling order follows the tree, unaffected by `Reverse`). Hidden nodes are included with zero rectangles. An undersized buffer throws before writing anything — use `tree.GetSubtreeCount(root)` or `tree.Count` to size it.
+
+`LayoutResult` is a `readonly record struct(NodeId Node, Rect WorldRect)`.
+
+---
+
+## Intrinsic Content Sizing
+
+Nodes with `Width = Length.Auto` or `Height = Length.Auto` can supply a `MeasureContent` callback that returns the natural content size given an available space constraint. This is how text measurement integrates with the layout engine.
+
+```csharp
+// Register once
+tree.SetMeasure(labelNode,
+    (node, available, context) => MeasureText((string)context!, available.Width),
+    context: myTextString);
+
+// When the underlying content changes (e.g. new text string), invalidate manually
+tree.MarkDirty(labelNode);
+
+// Re-registering via SetMeasure always invalidates, making it a safe fallback
+// when you are unsure whether the content changed
+tree.SetMeasure(labelNode, measureFn, newTextString);
+```
+
+<ParamField path="MeasureContent delegate" type="Size(NodeId, Size available, object? context)">
+  Called during the measure pass. Must return a finite, non-negative `Size`. Must not mutate the tree or call `Layout` recursively. The result is cached per constraint set; `MarkDirty` clears the cache for one node.
+</ParamField>
+
+---
+
+## Manual Invalidation
+
+Scaffold tracks dirtiness automatically for style changes, but it cannot observe changes to external content (string data, font metrics, DPI changes). Use the explicit invalidation API for those cases:
+
+```csharp
+// Dirty a single node (and its ancestors)
+tree.MarkDirty(labelNode);
+
+// Dirty an entire subtree (e.g. after a DPI or font-atlas change)
+tree.MarkSubtreeDirty(panelNode);
+```
+
+Repeated invalidations on an already-dirty ancestor coalesce — marking a dirty node's parent is a no-op.
+
+---
+
+## Node Reordering
+
+`PlaceAfter` moves a node within (or to) a parent without recreating it:
+
+```csharp
+// Move node to a different parent, after a specific sibling
+tree.PlaceAfter(node, newParent, afterSibling);
+
+// Move to the front of a parent's child list
+tree.PlaceAfter(node, newParent, after: default);
+```
+
+The moved node's style, measure callback, and result state are preserved. The node and both parents are marked dirty.
+
+---
+
+## Performance
+
+`LayoutStatistics` is returned by `Layout` and also available via `tree.Statistics`:
+
+```csharp
+LayoutStatistics stats = tree.Layout(root, new Size(1280, 720));
+
+Console.WriteLine($"Measured:       {stats.MeasuredNodes}");
+Console.WriteLine($"Arranged:       {stats.ArrangedNodes}");
+Console.WriteLine($"Measure hits:   {stats.MeasureCacheHits}");
+Console.WriteLine($"Arrange hits:   {stats.ArrangeCacheHits}");
+```
+
+<Accordion title="Zero-Alloc Design">
+
+Scaffold achieves zero managed allocation in steady state through several design decisions:
+
+- **Value-type storage**: `Style`, `Length`, `NodeId`, `Rect`, `Size`, `LayoutResult` are all `readonly record struct`s held in a flat `Node[]` array, not heap-allocated objects.
+- **Inline measure cache**: Each node carries a 4-slot `MeasureCache` (the four most recent measure results under different constraints), eliminating dictionary lookups or list allocations during the measure pass.
+- **Dirty-path tracking**: `SetStyle` walks up the ancestor chain marking ancestors dirty without any allocation — it operates on indices into `_nodes`.
+- **`CopyWorldRects` Span API**: The bulk result copy uses a caller-supplied `Span<LayoutResult>`, so the renderer can reuse its buffer across frames.
+- **`Reserve` pre-allocation**: `LayoutTree(capacity)` and `Reserve(n)` allow one upfront allocation; subsequent `Create` calls reuse free slots via an intrusive free-list.
+
+The only allocations are: initial tree creation, growing `_nodes` when `capacity` is exceeded, and registering `MeasureContent` delegates and their context objects (done once per node, not per frame).
+
+</Accordion>
+
+<Info>
+Trees are single-threaded and limited to **256 nesting levels**, checked at `Create` and `PlaceAfter`. A layout pass on a root whose entire subtree is clean is O(1) — it returns immediately with no work.
+</Info>
+
+---
+
+## Complete Example
+
+The following example builds a persistent two-panel layout (sidebar + content area), pre-allocates storage, runs layout each frame with a changing viewport, and reads world rectangles for rendering.
+
+```csharp
+using Prowl.Scaffold;
+
+// ── One-time setup ──────────────────────────────────────────────────────────
+var tree = new LayoutTree(capacity: 256);
+
+// Root: full viewport, horizontal row
+NodeId root = tree.Create(Style.Default with
+{
+    Layout   = LayoutMode.Row,
+    Gap      = 0,
+    Width    = Length.Stretch(),
+    Height   = Length.Stretch(),
+});
+
+// Sidebar: fixed width, full height
+NodeId sidebar = tree.Create(Style.Default with
+{
+    Layout   = LayoutMode.Column,
+    Width    = 240,
+    Height   = Length.Stretch(),
+    Padding  = new LengthEdges(horizontal: 12, vertical: 8),
+    Gap      = 6,
+}, parent: root);
+
+// Content area: fills remaining horizontal space
+NodeId content = tree.Create(Style.Default with
+{
+    Layout   = LayoutMode.Column,
+    Width    = Length.Stretch(),
+    Height   = Length.Stretch(),
+    Padding  = new LengthEdges(16),
+    Gap      = 12,
+}, parent: root);
+
+// A few items in the sidebar
+NodeId[] sidebarItems = new NodeId[4];
+for (int i = 0; i < sidebarItems.Length; i++)
+{
+    sidebarItems[i] = tree.Create(Style.Default with
+    {
+        Width  = Length.Stretch(),
+        Height = 36,
+    }, parent: sidebar);
+}
+
+// Preallocate the result buffer once (outside the hot path)
+var resultBuffer = new LayoutResult[tree.Count];
+
+// ── Per-frame update ────────────────────────────────────────────────────────
+void UpdateLayout(float viewportWidth, float viewportHeight)
+{
+    // Resize the buffer if the node count has grown
+    if (resultBuffer.Length < tree.Count)
+        resultBuffer = new LayoutResult[tree.Count];
+
+    // Run layout — only dirty nodes are recomputed
+    LayoutStatistics stats = tree.Layout(root, new Size(viewportWidth, viewportHeight));
+
+    // Bulk read world rects for the entire tree
+    int written = tree.CopyWorldRects(root, resultBuffer);
+
+    for (int i = 0; i < written; i++)
+    {
+        NodeId nodeId   = resultBuffer[i].Node;
+        Rect   worldRect = resultBuffer[i].WorldRect;
+
+        // Pass geometry to your renderer — Scaffold is renderer-agnostic
+        MyRenderer.DrawPanel(nodeId, worldRect);
+    }
+
+    // Or read individual nodes
+    Rect sidebarRect = tree.GetWorldRect(sidebar);
+    Rect contentRect = tree.GetWorldRect(content);
+    MyRenderer.DrawBackground(sidebarRect, Color.DarkGray);
+    MyRenderer.DrawBackground(contentRect, Color.White);
+}
+
+// ── Style update — dirtying only the changed node ───────────────────────────
+void ResizeSidebar(float newWidth)
+{
+    tree.SetStyle(sidebar, tree.GetStyle(sidebar) with { Width = newWidth });
+    // Next call to Layout will recompute only sidebar and its ancestors
+}
+
+// ── Intrinsic text measurement ───────────────────────────────────────────────
+void AddTextLabel(string text)
+{
+    NodeId label = tree.Create(Style.Default with
+    {
+        Width  = Length.Stretch(),
+        Height = Length.Auto,      // height derived from text
+        Margin = new LengthEdges(all: 4),
+    }, parent: content);
+
+    tree.SetMeasure(label,
+        (node, available, ctx) =>
+        {
+            var str = (string)ctx!;
+            // Replace with your actual font/text measurement
+            float measuredH = MyFontSystem.MeasureTextHeight(str, available.Width);
+            return new Size(available.Width, measuredH);
+        },
+        context: text);
+}
+```

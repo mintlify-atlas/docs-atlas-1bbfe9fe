@@ -1,0 +1,325 @@
+---
+title: "Prowl.Slang: Managed .NET Bindings for the Slang Shader Compiler"
+sidebarTitle: "Slang"
+description: "Prowl.Slang wraps the Slang shader compiler COM API in safe .NET types, providing C# exceptions, GC-tracked objects, shader reflection, and error parsing."
+---
+
+Prowl.Slang is a managed .NET wrapper around the [Slang shader compiler](https://github.com/shader-slang/slang), covering nearly its entire native COM API. Where the C++ API demands manual `AddRef`/`Release` reference counting, C# finalizers handle lifetime automatically. Where the native API uses `SlangResult` return codes, the wrapper translates failures into C# exceptions so you can use standard `try`/`catch` patterns. The entire public API is fully XML-documented, including parts of Slang not originally documented in the upstream source, making it practical to drive Slang from C# without consulting the C++ headers.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Slang
+```
+
+<Note>
+Pre-compiled native Slang binaries are bundled for **Windows, Linux, and macOS** on both **x86-64** and **ARM64**. No separate Slang SDK installation is required.
+</Note>
+
+## Compilation Workflow
+
+<Steps>
+  <Step title="Configure a target">
+    Create a `TargetDescription` describing the output format and shader profile you want to emit.
+
+    ```csharp
+    using Prowl.Slang;
+
+    TargetDescription target = new()
+    {
+        Format  = CompileTarget.Spirv,
+        Profile = GlobalSession.FindProfile("spirv_1_5"),
+    };
+    ```
+  </Step>
+
+  <Step title="Open a Session">
+    Create a `SessionDescription` and call `GlobalSession.CreateSession`. The session holds loaded modules in a cache; reuse one session across many shader compilations to avoid redundant module parsing.
+
+    ```csharp
+    SessionDescription sessionDesc = new()
+    {
+        Targets     = [target],
+        SearchPaths = ["./", "./Shaders"],
+    };
+
+    Session session = GlobalSession.CreateSession(sessionDesc);
+    ```
+  </Step>
+
+  <Step title="Load a Module">
+    Load a `.slang` file by its module name (without extension). Slang searches your declared `SearchPaths`. Diagnostics (warnings, notes) are written to `diagnostics`; errors throw `CompilationException`.
+
+    ```csharp
+    Module module = session.LoadModule("shaders", out DiagnosticInfo diagnostics);
+    ```
+  </Step>
+
+  <Step title="Find EntryPoints">
+    Retrieve individual entry points by name. An `EntryPoint` is a `ComponentType` that can be linked and compiled independently.
+
+    ```csharp
+    EntryPoint vertex   = module.FindEntryPointByName("vertexMain");
+    EntryPoint fragment = module.FindEntryPointByName("fragmentMain");
+    ```
+  </Step>
+
+  <Step title="Compose a ComponentType">
+    Build a composite `ComponentType` from the module and entry points. This is the linkage step — Slang resolves `import` dependencies and checks that entry point signatures are compatible.
+
+    ```csharp
+    ComponentType program = session.CreateCompositeComponentType(
+        [module, vertex, fragment], out diagnostics);
+    ```
+  </Step>
+
+  <Step title="Get compiled code">
+    Call `GetEntryPointCode` with the zero-based entry-point index and target index. The result is a `Memory<byte>` — SPIR-V words for Vulkan targets, DXIL for D3D12, MSL for Metal, and so on.
+
+    ```csharp
+    Memory<byte> compiledVertex   = program.GetEntryPointCode(0, 0, out diagnostics);
+    Memory<byte> compiledFragment = program.GetEntryPointCode(1, 0, out diagnostics);
+    ```
+  </Step>
+</Steps>
+
+## GlobalSession
+
+`GlobalSession` is a `static` factory class — there is no instance to create. Every call automatically initialises the global Slang context on first use:
+
+```csharp
+// Create a Session configured with one or more targets.
+Session session = GlobalSession.CreateSession(in sessionDesc);
+
+// Look up a named profile (returns ProfileID.Unknown if not found).
+ProfileID spirv15 = GlobalSession.FindProfile("spirv_1_5");
+ProfileID sm60    = GlobalSession.FindProfile("sm_6_0");
+```
+
+<Warning>
+`GlobalSession` is process-wide. Calling `GlobalSession.CreateSession` is thread-safe; the underlying Slang global session is initialised exactly once.
+</Warning>
+
+## SessionDescription & TargetDescription
+
+`SessionDescription` collects everything that scopes a compilation session:
+
+```csharp
+SessionDescription sessionDesc = new()
+{
+    Targets                = [target],          // One TargetDescription per output format
+    SearchPaths            = ["./Shaders"],      // #include / import search roots
+    PreprocessorMacros     = [                   // Global #define list
+        new() { Name = "VULKAN", Value = "1" }
+    ],
+    DefaultMatrixLayoutMode = MatrixLayoutMode.RowMajor,
+    AllowGLSLSyntax        = false,
+    FileProvider           = new VirtualFileProvider(), // Optional virtual FS
+};
+```
+
+`TargetDescription` scopes a single code generation target:
+
+```csharp
+TargetDescription target = new()
+{
+    Format               = CompileTarget.Spirv,
+    Profile              = GlobalSession.FindProfile("spirv_1_5"),
+    Flags                = TargetFlags.Default,
+    FloatingPointMode    = FloatingPointMode.Default,
+    LineDirectiveMode    = LineDirectiveMode.None,
+    ForceGLSLScalarBufferLayout = false,
+};
+```
+
+`CompileTarget` enumerates all supported output languages, including:
+
+| Value | Output |
+|---|---|
+| `Spirv` | SPIR-V binary (Vulkan) |
+| `Hlsl` | HLSL source text |
+| `Glsl` | GLSL source text |
+| `Msl` | Metal Shading Language source |
+| `Dxil` | DXIL binary (D3D12) |
+| `CSource` | C source (CPU soft-render) |
+| `CppSource` | C++ source |
+
+## Session
+
+`Session` is the scoped compilation context. Load modules and compose programs from it:
+
+```csharp
+// Load by file name (Slang searches SearchPaths for "shaders.slang").
+Module module = session.LoadModule("shaders", out DiagnosticInfo diag);
+
+// Load directly from source text — useful for runtime-generated shaders.
+Module fromSource = session.LoadModuleFromSourceString(
+    "dynamic", "dynamic.slang", slangSourceCode, out diag);
+
+// Create a linked composite of modules and entry points.
+ComponentType program = session.CreateCompositeComponentType(
+    [module, vertex, fragment], out diag);
+```
+
+## Module & EntryPoint
+
+`Module` extends `ComponentType` and is the direct result of loading a `.slang` file:
+
+```csharp
+EntryPoint vs = module.FindEntryPointByName("VSMain");
+EntryPoint ps = module.FindEntryPointByName("PSMain");
+EntryPoint cs = module.FindEntryPointByName("CSMain");
+```
+
+`EntryPoint` inherits from `ComponentType`, so it can be passed directly to `CreateCompositeComponentType` or compiled standalone. The `ShaderStage` of each entry point (Vertex, Fragment, Compute, Geometry, Mesh, etc.) is part of the Slang reflection API.
+
+## ComponentType
+
+`ComponentType` is the fundamental unit of Slang's compilation model — a module, entry point, or composite of both. The most important method for obtaining compiled code is:
+
+```csharp
+// Compile entry point at entryPointIndex for the target at targetIndex.
+// entryPointIndex is the order they were passed to CreateCompositeComponentType.
+Memory<byte> spirv = program.GetEntryPointCode(
+    entryPointIndex: 0,
+    targetIndex:     0,
+    out DiagnosticInfo diagnostics);
+```
+
+<Info>
+`Memory<byte>` is valid for the lifetime of the `ComponentType` object. If you need the bytes to outlive the program, call `spirv.ToArray()` to take a copy.
+</Info>
+
+## Diagnostics
+
+`DiagnosticInfo` is the out-parameter type returned by every compilation method. It holds a list of `Diagnostic` entries parsed from the Slang compiler's text output:
+
+```csharp
+public struct Diagnostic : IEquatable<Diagnostic>
+{
+    public Severity Severity;  // Note, Warning, Error, Fatal, Internal
+    public string   File;
+    public int      Line;
+    public int      Column;
+    public int      Code;
+    public string   Message;
+}
+```
+
+When a compilation step fails, `CompilationException` is thrown. Access the full diagnostic list from its `Diagnostics` property:
+
+```csharp
+try
+{
+    Module module = session.LoadModule("bad_shader", out _);
+}
+catch (CompilationException ex)
+{
+    foreach (Diagnostic d in ex.Diagnostics)
+        Console.Error.WriteLine($"[{d.Severity}] {d.File}:{d.Line} — {d.Message}");
+}
+```
+
+`Severity` values in ascending priority: `Note`, `Warning`, `Error`, `Fatal`, `Internal`.
+
+## Shader Reflection
+
+Prowl.Slang exposes Slang's full reflection API through strongly-typed .NET classes. Key enums for inspecting compiled programs:
+
+| Enum | Description |
+|---|---|
+| `TypeKind` | `Scalar`, `Vector`, `Matrix`, `Array`, `Struct`, `Resource`, `SamplerState`, `Interface`, … |
+| `ScalarType` | `Bool`, `Int32`, `Uint32`, `Float16`, `Float32`, `Float64`, … |
+| `ResourceShape` | `Texture1D`, `Texture2D`, `Texture3D`, `TextureCube`, `Buffer`, `StructuredBuffer`, … |
+| `ParameterCategory` | `Uniform`, `DescriptorTableSlot`, `RegisterSpace`, `ConstantBuffer`, `ShaderResource`, … |
+| `BindingType` | `Unknown`, `Sampler`, `Texture`, `ConstantBuffer`, `RawBuffer`, `TypedBuffer`, … |
+| `ShaderStage` | `None`, `Vertex`, `Fragment`, `Compute`, `Geometry`, `TessControl`, `TessEval`, `Mesh`, `Amplification`, … |
+
+## Custom File System
+
+Supply an `IFileProvider` implementation in `SessionDescription.FileProvider` to intercept all file loads. This is useful for loading shaders from a virtual file system, an asset database, or an embedded resource stream:
+
+```csharp
+public class VirtualFileProvider : IFileProvider
+{
+    private readonly Dictionary<string, string> _files;
+
+    public VirtualFileProvider(Dictionary<string, string> files)
+        => _files = files;
+
+    public bool TryGetFileContents(string path, out string? contents)
+        => _files.TryGetValue(path, out contents);
+}
+
+// Usage
+var provider = new VirtualFileProvider(new()
+{
+    ["common.slang"]    = commonSlangSource,
+    ["lighting.slang"]  = lightingSlangSource,
+});
+
+Session session = GlobalSession.CreateSession(new SessionDescription
+{
+    Targets      = [target],
+    FileProvider = provider,
+});
+```
+
+## Complete Compilation Example
+
+The following example shows the full workflow from `GlobalSession` to raw SPIR-V bytes, suitable for uploading to a Vulkan `VkShaderModule`:
+
+```csharp
+using Prowl.Slang;
+
+// 1. Describe the target.
+TargetDescription target = new()
+{
+    Format  = CompileTarget.Spirv,
+    Profile = GlobalSession.FindProfile("spirv_1_5"),
+};
+
+// 2. Open a session.
+Session session = GlobalSession.CreateSession(new SessionDescription
+{
+    Targets     = [target],
+    SearchPaths = ["./Shaders"],
+    PreprocessorMacros = [
+        new PreprocessorMacroDescription { Name = "VULKAN", Value = "1" }
+    ],
+});
+
+// 3. Load the shader module.
+Module module = session.LoadModule("pbr", out DiagnosticInfo loadDiag);
+
+if (loadDiag.HasErrors)
+{
+    foreach (var d in loadDiag.Diagnostics)
+        Console.Error.WriteLine($"{d.File}:{d.Line}: {d.Message}");
+    return;
+}
+
+// 4. Locate entry points.
+EntryPoint vertexEP   = module.FindEntryPointByName("VSMain");
+EntryPoint fragmentEP = module.FindEntryPointByName("PSMain");
+
+// 5. Link into a composite program.
+ComponentType program = session.CreateCompositeComponentType(
+    [module, vertexEP, fragmentEP], out DiagnosticInfo linkDiag);
+
+// 6. Compile each stage.
+Memory<byte> vertexSpirv   = program.GetEntryPointCode(0, 0, out DiagnosticInfo vertDiag);
+Memory<byte> fragmentSpirv = program.GetEntryPointCode(1, 0, out DiagnosticInfo fragDiag);
+
+Console.WriteLine($"Vertex stage:   {vertexSpirv.Length} bytes of SPIR-V");
+Console.WriteLine($"Fragment stage: {fragmentSpirv.Length} bytes of SPIR-V");
+
+// 7. Hand the bytes to your graphics API.
+//    Memory<byte>.Span gives a direct view; .ToArray() copies if needed.
+UploadShaderModule(vertexSpirv.Span);
+UploadShaderModule(fragmentSpirv.Span);
+```
+
+<Note>
+Reuse the `Session` object across multiple `LoadModule` calls. The session's module cache keeps already-parsed modules in memory, so `import` chains are resolved without re-reading disk.
+</Note>

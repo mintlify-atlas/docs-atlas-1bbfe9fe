@@ -1,0 +1,198 @@
+---
+title: "Merging an Independent Library into Prowl Anthology"
+sidebarTitle: "Merging Libraries"
+description: "Step-by-step guide to folding a standalone Prowl library repo into the Anthology monorepo using git-filter-repo, preserving full commit history."
+---
+
+Libraries in Prowl Anthology started life as independent Git repositories. Once a library is stable — meaning its public API has settled, it has tests, and it is ready for public release — it is folded into this monorepo. The fold-in process rewrites the library's entire commit history so every historical file lives under a `<Name>/` subfolder. After the merge, `git log -- Vector/` shows the complete lineage of that library alongside everything else in the monorepo, sortable and bisectable by commit date forever. The source repository is never modified — the script clones it to a temporary directory first — so the original repo can remain in place or be archived at your own pace.
+
+<Note>
+Only merge a library when it is genuinely ready to ship. The fold-in publishes the library's entire commit history. If the history contains sensitive data, credentials, or work-in-progress you do not want public, squash the history before merging or keep the library in its own private repo until it is clean.
+</Note>
+
+---
+
+## Prerequisites
+
+Before running the merge script, verify the following:
+
+- **Python 3** is installed and on your `PATH`. The `git-filter-repo` tool that drives history rewriting is a single Python script bundled in `scripts/` — no separate installation is needed.
+- **Your Anthology working tree is clean.** The script refuses to run if `git status --porcelain` returns any output. Commit or stash all pending changes first.
+- The **source repository** exists at the path (or URL) you will pass as `-Source`. It must be a valid Git repository (i.e., it has a `.git` directory).
+- The **target subfolder** (`<Name>/`) must not already exist in the Anthology root. The script checks and aborts early if it does.
+
+---
+
+## Run the Merge Script
+
+From the Anthology repository root, invoke `Merge-Library.ps1` with the library's intended subfolder name and the path to its source repository:
+
+```powershell
+./scripts/Merge-Library.ps1 -Name Vector -Source ../Prowl.Vector
+```
+
+On **Linux or macOS**, the equivalent Bash script is available:
+
+```bash
+./scripts/Merge-Library.sh -Name Vector -Source ../Prowl.Vector
+```
+
+If the source repository's default branch is not `main` (for example, `Scribe` uses `master` and `Slang` uses `Managed`), pass the branch name explicitly:
+
+```powershell
+./scripts/Merge-Library.ps1 -Name Scribe -Source ../Prowl.Scribe -Branch master
+```
+
+When the script completes you will see:
+
+```
+Done. 'Vector/' folded in (merge committed).
+Verify history:  git log --oneline -- Vector/
+```
+
+---
+
+## What the Script Does
+
+Understanding the internals helps if the script fails partway through or if you need to adapt it for an unusual case.
+
+<Steps>
+  <Step title="Sanity checks">
+    The script verifies that it is running inside the Anthology repo, that the target folder does not already exist, that `scripts/git-filter-repo` is present, that the source path is a valid Git repo, and that the working tree is clean. Any failed check throws an error immediately.
+  </Step>
+  <Step title="Clone to a temporary directory">
+    The source repo is cloned with `--no-hardlinks` to a fresh temp directory. Using `--no-hardlinks` ensures the original repository's object store is never touched, even if something goes wrong in later steps.
+
+    ```powershell
+    git clone --no-hardlinks --quiet "$src" "$tmp"
+    ```
+  </Step>
+  <Step title="Rewrite history with git-filter-repo">
+    Inside the temp clone, `git-filter-repo` rewrites every commit so that all files are moved under `<Name>/`. A commit that previously touched `Vector/Maths.cs` is rewritten to touch `Vector/Vector/Maths.cs`, and so on.
+
+    ```powershell
+    python "$filterRepo" --force --to-subdirectory-filter "$Name"
+    ```
+  </Step>
+  <Step title="Merge rewritten history into Anthology">
+    The rewritten temp clone is added as a temporary remote, fetched, and merged with `--allow-unrelated-histories` (the two repos share no common ancestor). The merge commit message records which library was folded in.
+
+    ```powershell
+    git remote add import_Vector "$tmp"
+    git fetch --quiet import_Vector
+    git merge --allow-unrelated-histories --no-edit \
+        -m "Fold in Vector with full history" import_Vector/main
+    git remote remove import_Vector
+    ```
+  </Step>
+  <Step title="Cleanup">
+    The temporary clone is deleted. The Anthology working tree now contains the new `<Name>/` folder and the merge commit that joined the two histories.
+  </Step>
+</Steps>
+
+---
+
+## Post-Merge Cleanup
+
+Once the fold-in commit is in place, the library's `.csproj` needs to be trimmed. `Directory.Build.props` now supplies everything that was previously declared per-library, so duplicates must be removed to avoid conflicting overrides.
+
+<Steps>
+  <Step title="Remove the library's own version pin">
+    A leftover `<Version>` tag in the `.csproj` overrides the family version declared in `Directory.Build.props`. This is the most dangerous omission: if left in place, the library would publish at its old version number on the next release, not the current family version.
+
+    ```xml
+    <!-- Remove this line entirely -->
+    <Version>1.0.4</Version>
+    ```
+  </Step>
+  <Step title="Remove now-redundant metadata">
+    The following tags are already supplied by `Directory.Build.props` and should be deleted from the individual `.csproj` if they are identical to the shared values:
+
+    ```xml
+    <!-- Remove all of these -->
+    <Authors>Prowl Contributors</Authors>
+    <PackageId>Prowl.Vector</PackageId>
+    <RootNamespace>Prowl.Vector</RootNamespace>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+
+    <!-- Also remove the duplicate LICENSE pack item — the shared
+         Directory.Build.targets already packs the repo-root LICENSE.
+         Leaving this causes a duplicate-file error at pack time. -->
+    <None Include="..\LICENSE" Pack="true" PackagePath="\" />
+    ```
+  </Step>
+  <Step title="Flip package references to project references">
+    Any `PackageReference` to another Anthology library must become a `ProjectReference` so the monorepo builds consistently from source without relying on published NuGet packages. For example, in `Quill.csproj`:
+
+    ```xml
+    <!-- Before -->
+    <PackageReference Include="Prowl.Scribe" Version="1.0.2" />
+
+    <!-- After -->
+    <ProjectReference Include="..\..\Scribe\Scribe\Scribe.csproj" />
+    ```
+
+    The relative path goes up two levels (out of `Quill/Quill/`) to the repo root and then into the target library's project folder.
+  </Step>
+  <Step title="Keep library-specific metadata">
+    These tags are per-library and must stay in the `.csproj`. Do not delete them:
+
+    ```xml
+    <Title>Prowl.Vector — 3D Mathematics</Title>
+    <Description>A comprehensive mathematics library …</Description>
+    <PackageTags>math;vector;matrix;quaternion;game-engine</PackageTags>
+
+    <!-- README packing: the library's own README, not the repo root one -->
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Common Gotchas
+
+<Accordion title="Duplicate project names — multiple Tests.csproj collide">
+  Most standalone repos have a project literally named `Tests` (assembly name `Tests`, output path `bin/Tests.dll`). When several libraries are merged into the same solution, MSBuild and the test runner cannot distinguish projects with the same assembly name, and the output files overwrite each other.
+
+  **Fix:** rename each test project to `<Name>.Tests`. For example, rename `Tests.csproj` to `Vector.Tests.csproj` and update its `<AssemblyName>` and `<RootNamespace>` accordingly. Then re-add the project to `Anthology.slnx` under the new name.
+
+  `Prowl.Crumb` already uses `Prowl.Crumb.Tests` as its test project name, so it needs no rename.
+</Accordion>
+
+<Accordion title="Projects already named Prowl.X — PackageId assumed no prefix">
+  `Directory.Build.targets` derives the `PackageId` as `Prowl.$(AssemblyName)`. This works correctly when the assembly is named `Vector` (producing `Prowl.Vector`). But if the assembly was already named `Prowl.Crumb`, the derived ID becomes `Prowl.Prowl.Crumb` — which is wrong.
+
+  **Fix:** rename the assembly (and project file) from `Prowl.Crumb` to `Crumb`. Update `<AssemblyName>Crumb</AssemblyName>` and `<RootNamespace>Prowl.Crumb</RootNamespace>` (the namespace can stay prefixed; only the assembly name must change). The shared macro then produces the correct `PackageId` of `Prowl.Crumb`.
+</Accordion>
+
+---
+
+## Verify the Merge
+
+After cleanup, confirm that history is intact and the solution builds cleanly:
+
+```powershell
+# Full commit history for the merged library, scoped to its folder
+git log --oneline -- Vector/
+
+# Build every project in the solution in Release configuration
+dotnet build Anthology.slnx -c Release
+```
+
+A successful `dotnet build` with no errors is the minimum bar. Run the test suite for the affected library as an additional check:
+
+```powershell
+dotnet test Anthology.slnx -c Release --filter "FullyQualifiedName~Prowl.Vector"
+```
+
+---
+
+## Still Private or Unfinished?
+
+Not every library is ready for public release at the same time. The rule is straightforward: anything that is not ready to ship stays in its own repository and is not folded in yet. There is no requirement to merge a library just because others have been merged.
+
+When you do merge, keep in mind:
+
+- **The entire commit history becomes public.** If the library's history contains secrets, credentials, TODO comments that reveal unannounced features, or other sensitive content, clean the history before merging — or squash it to a single initial commit.
+- **Squashing is optional.** If the history is clean and you want `git blame` to trace individual changes back to their original context, preserve it in full. If the history is noisy or private, pass `--squash` to `git merge` after the filter-repo step to land everything as a single commit.

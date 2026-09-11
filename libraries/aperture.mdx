@@ -1,0 +1,380 @@
+---
+title: "Prowl.Aperture: Dependency-Free Image Loading for 14 Formats"
+sidebarTitle: "Aperture"
+description: "Prowl.Aperture loads BMP, DDS, EXR, GIF, HDR, JPEG, PNG, PSD, TGA, TIFF, WebP, and more with pooled memory and a zero-copy GPU upload path."
+---
+
+Prowl.Aperture is a dependency-free image loading library that decodes fourteen container formats from a single `Image.Load` call, with no native DLLs and no transitive NuGet dependencies. Pixel memory is rented from a shared `ArrayPool` so repeated loads during gameplay are allocation-cheap. The decode options are designed around GPU texture uploads: request the exact `PixelFormat`, `RowAlignment`, and vertical flip the graphics API wants, and the decoder writes directly into that layout without a second pass. When a format stores multiple frames — an animated GIF, a cube map DDS, or a multi-page TIFF — the full frame list is optionally decoded in one call.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Aperture
+```
+
+## Supported Formats
+
+| Format | Notes |
+|---|---|
+| **BMP** | Core through V5, every colour depth, RLE, arbitrary bitfields, embedded JPEG and PNG |
+| **DDS** | BC1–BC7, ASTC, video and float variants, full mip chains, cube faces, volume slices |
+| **EXR** | Scanline, tiled with mip levels, multi-part, brightness/chroma, all eight compressions |
+| **GIF** | 87a and 89a, animated frames with disposal modes, interlacing, transparency |
+| **HDR** | Radiance RGBE and XYZE, both run-length encodings, all axis orderings |
+| **ICO** | BMP and PNG entries, every icon size, cursor resources, 256-pixel entries, transparency masks |
+| **JPEG** | Baseline, extended, progressive, arithmetic, every subsampling, restart markers, CMYK |
+| **PNG** | Every colour type and depth, Adam7 interlacing, tRNS transparency, CRC validation, APNG frames |
+| **PNM** | P1–P6 and PAM, ASCII and binary, every sample range |
+| **PSD** | PSD and PSB (large document), flattened image, every colour depth and mode |
+| **RAW/DNG** | DNG and vendor TIFF-based formats (CR2, NEF, ARW, ORF, RW2, RAF) plus CR3; vendor streams refused |
+| **TGA** | Uncompressed and RLE, colour-mapped, all bit depths and origins |
+| **TIFF** | Classic and BigTIFF, multi-page, strips and tiles, any sample width, both JPEG forms, fax, log luminance |
+| **WebP** | Lossy, lossless, alpha channel, animated WebP |
+
+## Basic Loading
+
+```csharp
+using Prowl.Aperture;
+
+// Throwing overload — use for files you produced and trust.
+using Image image = Image.Load("photo.png");
+
+// Use the root frame's pixel data.
+Span<byte> pixels = image.RootFrame.Pixels;
+Console.WriteLine($"{image.Width}x{image.Height} {image.PixelFormat}");
+
+// Non-throwing overload — use for files from untrusted sources.
+if (Image.TryLoad("untrusted.png", DecodeOptions.Default,
+                  out Image? loaded, out ApertureError error))
+{
+    using (loaded)
+        Upload(loaded!.RootFrame.Pixels);
+}
+else
+{
+    Console.Error.WriteLine($"Decode failed: {error}");
+}
+```
+
+`Image.Load` and `Image.TryLoad` also accept `ReadOnlySpan<byte>` and `byte[]` directly, so you can decode from an in-memory blob without touching the file system.
+
+## ImageFrame
+
+`ImageFrame` is one decoded raster — one per animation frame, per icon entry, or per mip level. The pixel memory is owned by the parent `Image` and backed by a pooled array, so do not hold a `Span<byte>` past the enclosing `using` block:
+
+```csharp
+ImageFrame frame = image.RootFrame;
+
+int width    = frame.Width;
+int height   = frame.Height;
+int stride   = frame.Stride;   // bytes per row, may include row-alignment padding
+PixelFormat fmt = frame.PixelFormat;
+
+Span<byte>   pixels = frame.Pixels;       // whole frame buffer
+Memory<byte> memory = frame.PixelMemory;  // async-friendly view
+
+// Access one row.
+Span<byte> row3 = frame.GetRow(3);
+
+// Access one row reinterpreted as your own pixel struct.
+Span<Rgba32> typed = frame.GetRowAs<Rgba32>(3);
+
+// Copy into a caller-owned buffer, optionally re-striding.
+byte[] dest = new byte[frame.GetRequiredBytes(destinationStride: 256)];
+frame.CopyTo(dest, destinationStride: 256);
+```
+
+Animation-specific members:
+
+| Member | Description |
+|---|---|
+| `Delay` | How long this frame is displayed (`TimeSpan`, zero for stills) |
+| `Disposal` | `FrameDisposal` — `None`, `RestoreBackground`, `RestorePrevious` |
+| `Blend` | `FrameBlend` — `Source` (overwrite) or `Over` (alpha composite) |
+| `OffsetX` / `OffsetY` | Frame position on the canvas (GIF/APNG partial frames) |
+
+Mipmap-specific members:
+
+| Member | Description |
+|---|---|
+| `MipLevel` | 0 = full resolution |
+| `ArraySlice` | Array index or cube face (0 for plain 2D) |
+
+## DecodeOptions
+
+`DecodeOptions` controls format conversion, safety limits, and upload-friendliness. All properties have safe defaults via `DecodeOptions.Default`:
+
+```csharp
+DecodeOptions options = new()
+{
+    // Target pixel layout. Null keeps whatever the decoder produces naturally.
+    TargetPixelFormat = PixelFormat.Rgba8,
+
+    // Row pitch alignment (e.g. 256 for D3D12 upload heaps, 4 for OpenGL).
+    RowAlignment = 4,
+
+    // Write bottom row first — OpenGL's lower-left texture origin.
+    FlipVertically = true,
+
+    // Apply the Exif orientation tag (rotates/flips the pixel buffer).
+    ApplyExifOrientation = false,
+
+    // Decode every animation frame / cube face / page instead of just the first.
+    DecodeAllFrames = false,
+
+    // Decode the mip chain (DDS / KTX-style containers).
+    DecodeMipmaps = false,
+
+    // Safety limits (attacker-controlled headers cannot allocate unlimited memory).
+    MaxWidth           = 65535,
+    MaxHeight          = 65535,
+    MaxPixels          = 256L * 1024 * 1024,
+    MaxAllocationBytes = 1L << 30,
+    MaxFrames          = 1024,
+
+    // Keep pooled memory (false = allocate a plain array that outlives the Image).
+    UsePooledMemory = true,
+};
+```
+
+### GPU-Ready Upload Example
+
+```csharp
+using Image image = Image.Load(encodedBytes, new DecodeOptions
+{
+    TargetPixelFormat = PixelFormat.Rgba8,
+    FlipVertically    = true,       // OpenGL lower-left origin
+    RowAlignment      = 4,          // GL_UNPACK_ALIGNMENT default
+});
+
+ImageFrame frame = image.RootFrame;
+
+unsafe
+{
+    fixed (byte* pixels = frame.Pixels)
+        GL.TexSubImage2D(target, 0, 0, 0, image.Width, image.Height,
+                         PixelFormat.Rgba, PixelType.UnsignedByte, (nint)pixels);
+}
+// The fixed block must sit inside the using; TexSubImage2D copies synchronously.
+```
+
+`FlipVertically` costs nothing extra — the decoder writes one row at a time and picks destination rows from the opposite end of the buffer. `RowAlignment` pads every row to the requested byte boundary in-place, matching the stride a `GL_UNPACK_ROW_LENGTH` call would describe.
+
+## PixelFormat Enum
+
+```csharp
+public enum PixelFormat
+{
+    Unknown,
+    L8,       // 1-channel, 8-bit luminance
+    La8,      // 2-channel, 8-bit luminance + alpha
+    Rgb8,     // 3-channel, 8-bit
+    Rgba8,    // 4-channel, 8-bit  ← most common GPU upload target
+    L16,      // 1-channel, 16-bit
+    La16,     // 2-channel, 16-bit
+    Rgb16,    // 3-channel, 16-bit
+    Rgba16,   // 4-channel, 16-bit
+    RgbF16,   // 3-channel, 16-bit float (half)
+    RgbaF16,  // 4-channel, 16-bit float
+    LF32,     // 1-channel, 32-bit float
+    RgbF32,   // 3-channel, 32-bit float
+    RgbaF32,  // 4-channel, 32-bit float
+}
+```
+
+Extension methods in `PixelFormatInfo` provide `ChannelCount`, `BytesPerChannel`, `BytesPerPixel`, `HasAlpha`, and `IsFloatingPoint` for any format value.
+
+## ImageInfo — Metadata Only
+
+`Image.Identify` reads only the file header, never allocating a pixel buffer. Use it to check dimensions before committing to a full decode, or to filter oversized uploads:
+
+```csharp
+// From a file path
+ImageInfo info = Image.Identify("texture.png");
+Console.WriteLine($"{info.Width}x{info.Height} {info.PreferredPixelFormat} {info.Compression}");
+
+// From a byte span
+ImageInfo spanInfo = Image.Identify(rawBytes);
+
+// From a file — non-throwing overload
+if (Image.TryIdentify("maybe_image.bin", out ImageInfo? result, out ApertureError err))
+    Console.WriteLine($"{result!.Width}x{result.Height}");
+```
+
+`ImageInfo` properties:
+
+| Property | Description |
+|---|---|
+| `Format` | Detected `ImageFormat` container |
+| `Width` / `Height` | Primary image dimensions |
+| `BitsPerChannel` | Bits per channel as stored in the file |
+| `Channels` | Stored channel count (including alpha) |
+| `HasAlpha` | Whether the file carries per-pixel transparency |
+| `IsHdr` | Whether samples exceed the unit interval |
+| `ColorModel` | Colour space / model (sRGB, linear, CMYK, …) |
+| `PreferredPixelFormat` | The `PixelFormat` a decode produces when `TargetPixelFormat` is null |
+| `FrameCount` | Number of frames, pages, or icon entries |
+| `IsAnimated` | Whether frames form a temporal animation |
+| `MipmapCount` | Stored mip levels (1 for plain images) |
+| `Orientation` | `ExifOrientation` transform tag |
+| `Compression` | Human-readable compression name (e.g. "BC7", "Progressive", "PIZ") |
+
+## Block-Compressed Textures
+
+For DDS files that contain GPU block-compressed data, skip the decode step entirely with `TextureData`. This hands back the raw BC blocks ready for `CompressedTexImage2D` or Vulkan's `VK_FORMAT_BC*` upload:
+
+```csharp
+if (TextureData.TryLoad(File.ReadAllBytes("terrain.dds"),
+    out TextureData? data, out ApertureError err))
+{
+    using (data)
+    {
+        Console.WriteLine($"Format: {data!.Format}  ({data.FormatName})");
+        Console.WriteLine($"Mips:   {data.MipCount}");
+
+        TextureLevel level0 = data.GetLevel(mipLevel: 0, slice: 0);
+        ReadOnlySpan<byte> blocks = level0.Bytes.Span;
+
+        // Pass directly to the graphics API.
+        GL.CompressedTexImage2D(TextureTarget.Texture2D, 0,
+            MapToGlFormat(data.Format), level0.Width, level0.Height,
+            0, blocks.Length, blocks);
+    }
+}
+```
+
+`TextureFormat` is a DXGI-numbered enum covering all standard block-compressed layouts:
+
+| Range | Formats |
+|---|---|
+| BC1 | `Bc1Unorm`, `Bc1UnormSrgb` |
+| BC2 | `Bc2Unorm`, `Bc2UnormSrgb` |
+| BC3 | `Bc3Unorm`, `Bc3UnormSrgb` |
+| BC4 | `Bc4Unorm`, `Bc4Snorm` |
+| BC5 | `Bc5Unorm`, `Bc5Snorm` |
+| BC6H | `Bc6hUf16`, `Bc6hSf16` |
+| BC7 | `Bc7Unorm`, `Bc7UnormSrgb` |
+| ASTC | Various `Astc_*x*_Unorm` and `_UnormSrgb` block sizes |
+
+## Animated Images
+
+Set `DecodeAllFrames = true` to load every animation frame. Each `ImageFrame` carries compositing metadata:
+
+```csharp
+using Image animation = Image.Load("animation.gif", new DecodeOptions
+{
+    DecodeAllFrames = true,
+});
+
+Console.WriteLine($"{animation.Frames.Count} frames");
+
+foreach (ImageFrame frame in animation.Frames)
+{
+    Console.WriteLine(
+        $"  {frame.Width}x{frame.Height} @ ({frame.OffsetX},{frame.OffsetY})" +
+        $"  delay={frame.Delay.TotalMilliseconds}ms" +
+        $"  disposal={frame.Disposal}  blend={frame.Blend}");
+}
+```
+
+`FrameDisposal` and `FrameBlend` enums:
+
+| `FrameDisposal` | Description |
+|---|---|
+| `None` | Leave the canvas as-is; next frame composites over it |
+| `RestoreBackground` | Clear the frame's canvas region to transparent black |
+| `RestorePrevious` | Restore the canvas to how it looked before this frame |
+
+| `FrameBlend` | Description |
+|---|---|
+| `Source` | Overwrite destination pixels, alpha included |
+| `Over` | Alpha-composite over the destination using the frame's alpha |
+
+APNG multi-frame loading follows the same model; each PNG sub-frame carries its own disposal and blend instructions.
+
+## Format Detection
+
+`FormatDetector` identifies a container from its leading bytes without decoding any pixels. Detection is content-based and never trusts file extensions:
+
+```csharp
+// From a byte span (needs at most FormatDetector.MaxSignatureLength = 32 bytes).
+ImageFormat fmt = Image.DetectFormat(rawBytes);
+// or:
+ImageFormat fmt2 = FormatDetector.Detect(rawBytes);
+
+// With optional file name to resolve TGA (which has no leading signature).
+ImageFormat fmt3 = FormatDetector.Detect(rawBytes, fileName: "sprite.tga");
+
+// From a file path (reads a small probe from head and tail).
+ImageFormat fmt4 = Image.DetectFormat("unknown_file.bin");
+```
+
+`ImageFormat` values: `Bmp`, `Dds`, `Exr`, `Gif`, `Hdr`, `Ico`, `Jpeg`, `Png`, `Pnm`, `Tga`, `Tiff`, `Webp`, `Psd`, `Raw`, `Unknown`.
+
+## Encoding
+
+Aperture supports PNG encoding through `Image.Save`. The `EncodeOptions` type controls the output format and compression level:
+
+```csharp
+// Encode a loaded (or programmatically constructed) image to PNG bytes.
+byte[] pngBytes = image.Save(new EncodeOptions
+{
+    Format = ImageFormat.Png,
+});
+File.WriteAllBytes("output.png", pngBytes);
+```
+
+Additional encoder implementations can be registered at runtime through `ImageEncoderRegistry`.
+
+## Custom Codecs
+
+Replace a built-in decoder or register an entirely new format through the registry:
+
+```csharp
+// Replace the built-in PNG decoder with a custom one.
+ImageDecoderRegistry.Register(new MyFastPngDecoder());
+
+// Add a new format decoder.
+ImageDecoderRegistry.Register(new KtxDecoder());
+
+// Remove a format decoder (subsequent loads fail with ApertureError.NotSupported).
+ImageDecoderRegistry.Unregister(ImageFormat.Pnm);
+
+// Query what is registered.
+IReadOnlyCollection<ImageFormat> formats = ImageDecoderRegistry.RegisteredFormats;
+```
+
+A custom decoder implements `IImageDecoder`:
+
+```csharp
+public interface IImageDecoder
+{
+    ImageFormat Format { get; }
+    IReadOnlyList<string> FileExtensions { get; }  // e.g. [".ktx", ".ktx2"]
+    bool CanDecodePixels { get; }
+
+    // Return false (never throw) for malformed input.
+    bool TryIdentify(ReadOnlySpan<byte> data,
+                     out ImageInfo? info, out ApertureError error);
+
+    bool TryDecode(ReadOnlySpan<byte> data, DecodeOptions options,
+                   out Image? image, out ApertureError error);
+}
+```
+
+<Note>
+Decoder implementations **must not throw** for malformed input and **must** check `DecodeOptions` limits before allocating pixel memory. Return `false` with an appropriate `ApertureError` value instead.
+</Note>
+
+Similarly, `IImageEncoder` is the encoder counterpart, registered through `ImageEncoderRegistry`:
+
+```csharp
+public interface IImageEncoder
+{
+    ImageFormat Format { get; }
+    bool TryEncode(Image image, EncodeOptions options,
+                   out byte[]? encoded, out ApertureError error);
+}
+
+ImageEncoderRegistry.Register(new MyWebpEncoder());
+```

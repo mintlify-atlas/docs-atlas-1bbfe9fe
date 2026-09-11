@@ -1,0 +1,281 @@
+---
+title: "Prowl.Scribe: TrueType Font Parsing and Text Layout for .NET"
+sidebarTitle: "Scribe"
+description: "Prowl.Scribe parses TrueType fonts, packs glyph atlases, and provides text layout, rich text tags, Markdown parsing, and pluggable renderer backends."
+---
+
+Prowl.Scribe is a self-contained TrueType font parser and text layout engine for .NET. It does not depend on platform font APIs or any native library — the entire pipeline from raw TTF bytes to positioned, anti-aliased glyph quads lives in managed code. A pluggable `IFontRenderer` backend contract means the same layout logic works with OpenGL, Vulkan, Raylib, SFML, or any other renderer that can upload an 8-bit atlas texture and submit quad geometry. On top of the core parser, Scribe provides word-wrapped text layout with cursor hit-testing, a Unity-style rich text tag parser, and a Markdown parser with a high-level layout engine.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Scribe
+```
+
+## IFontRenderer — Backend Contract
+
+The entire rendering side of Scribe goes through a single interface. Implement it once for your graphics backend and every Scribe feature — plain text, rich text, Markdown — works automatically:
+
+```csharp
+public interface IFontRenderer
+{
+    // Create a GPU texture for the glyph atlas (RGBA, no mips needed).
+    object CreateTexture(int width, int height);
+
+    // Upload a sub-region of the atlas (called when new glyphs are rasterised).
+    void UpdateTextureRegion(object texture, AtlasRect bounds, byte[] data);
+
+    // Submit a batch of quads (pre-transformed glyph positions from the layout engine).
+    void DrawQuads(object texture, ReadOnlySpan<Vertex> vertices, ReadOnlySpan<int> indices);
+}
+```
+
+Each `Vertex` carries a `Float3` position, a `FontColor`, and a `Float2` texture coordinate. The indices form triangle lists. Your implementation owns the GPU-side texture handle returned by `CreateTexture`; Scribe treats it as an opaque `object`.
+
+<Tip>
+Prowl.Quill ships `TextRenderer : IFontRenderer` — if you are already using Quill for 2D rendering, pass its `TextRenderer` directly to `FontSystem` and share the atlas with the canvas.
+</Tip>
+
+## FontSystem
+
+`FontSystem` is the central API surface for Scribe. Construct it with your `IFontRenderer` and an optional initial atlas size:
+
+```csharp
+IFontRenderer renderer = new MyFontRenderer();
+FontSystem fs = new FontSystem(renderer, initialWidth: 512, initialHeight: 512);
+```
+
+Tune the atlas behaviour through properties:
+
+```csharp
+fs.AllowExpansion = true;       // Resize the atlas when glyphs overflow
+fs.ExpansionFactor = 2f;        // Double the atlas dimensions on each expansion
+fs.MaxAtlasSize = 4096;         // Hard cap on atlas dimensions
+fs.Padding = 1;                 // Texel gap between packed glyphs
+fs.DistanceRange = 4f;          // SDF range in atlas pixels (match your shader)
+fs.CacheLayouts = true;         // LRU-cache computed TextLayout objects
+fs.MaxLayoutCacheSize = 256;    // Maximum number of cached layouts
+```
+
+**`AtlasVersion`** is a monotonically increasing counter that increments whenever the atlas is rebuilt or resized. Cached `TextLayout` objects stamp their `AtlasVersion` at build time; compare against `FontSystem.AtlasVersion` before reusing them, or call `TextLayout.EnsureUpToDate`.
+
+### Loading Fonts
+
+```csharp
+// Load all system fonts, prioritising these families on the current OS.
+fs.LoadSystemFonts("Segoe UI", "Arial", "Liberation Sans");
+
+// Add an individual font from bytes.
+FontFile fontFile = fs.AddFont(File.ReadAllBytes("path/to/MyFont.ttf"));
+
+// Add a fallback used when the primary font is missing a glyph.
+fs.AddFallbackFont(fs.AddFont(File.ReadAllBytes("NotoSans-Regular.ttf")));
+```
+
+### Drawing Text
+
+```csharp
+FontFile font = fs.GetFont("Arial", FontStyle.Regular);
+
+// One-liner draw — positions at a Float2, any size.
+fs.DrawText("Hello, Scribe!", position: new Float2(40, 80),
+            color: FontColor.White, pixelSize: 24f, font: font);
+
+// Measure before drawing to center text.
+Float2 size = fs.MeasureText("Centered Text", pixelSize: 18f, font: font);
+fs.DrawText("Centered Text", new Float2((800 - size.X) / 2, 50),
+            FontColor.White, 18f, font);
+```
+
+## Loading Fonts
+
+`FontFile` wraps parsed TTF data. Load from a file path, a byte array, or a `Stream`:
+
+```csharp
+// From a file path
+FontFile fromPath = FontFile.Load("fonts/Roboto-Regular.ttf");
+
+// From a byte array (e.g. embedded resource)
+byte[] ttfBytes = Assembly.GetExecutingAssembly()
+    .GetManifestResourceStream("MyApp.Fonts.Roboto-Regular.ttf")!
+    .ToArray();
+FontFile fromBytes = FontFile.FromBytes(ttfBytes);
+```
+
+`FontFile` exposes full Unicode codepoint mapping, glyph outlines, horizontal and vertical metrics, and kerning pair tables. The underlying rasteriser is based on STB TrueType.
+
+## Text Layout
+
+For anything beyond simple one-liners, use `TextLayoutSettings` and the `FontSystem` layout pipeline. The settings struct captures everything that affects how text is broken and positioned:
+
+```csharp
+TextLayoutSettings settings = new TextLayoutSettings
+{
+    Font          = fs.GetFont("Arial", FontStyle.Regular),
+    PixelSize     = 16f,
+    WrapMode      = TextWrapMode.Wrap,
+    Alignment     = TextAlignment.Left,
+    MaxWidth      = 400f,
+    LetterSpacing = 0f,
+    WordSpacing   = 0f,
+    LineHeight    = 1.2f,  // multiplier; 1.0 = tight, 1.5 = relaxed
+    TabSize       = 4,
+    Quality       = FontQuality.Normal,
+    Underline     = false,
+    Strikethrough = false,
+};
+
+// Draw with implicit layout
+fs.DrawText("Long paragraph text that wraps at 400 pixels...",
+            new Float2(20, 100), FontColor.White, settings);
+
+// Or get the layout object for hit-testing / custom rendering
+TextLayout layout = fs.Layout("Selectable text", settings);
+```
+
+`TextWrapMode` and `TextAlignment` enums:
+
+| `TextWrapMode` | Description |
+|---|---|
+| `NoWrap` | Never break lines regardless of `MaxWidth` |
+| `Wrap` | Break at word boundaries when line exceeds `MaxWidth` |
+
+| `TextAlignment` | Description |
+|---|---|
+| `Left` | Align each line to the left edge |
+| `Center` | Centre each line within `MaxWidth` |
+| `Right` | Align each line to the right edge |
+
+A `TextLayout` contains a list of `Line` objects, each holding `GlyphInstance` entries that record the `AtlasGlyph`, on-screen position, advance width, character index, and cluster size (for ligature hit-testing).
+
+`FontQuality` controls the distance-field resolution the atlas is generated at — `Low` (16 px), `Normal` (32 px), `High` (64 px), or `Ultra` (128 px). Higher quality costs more atlas space and generation time but produces sharper results at small sizes.
+
+## Rich Text
+
+Scribe supports Unity-style inline markup tags. Parse source text into a `RichTextParseResult` and then lay it out with `RichTextLayout`:
+
+```csharp
+string source = "Normal <b>bold</b> and <color=#FF4466>red</color> and " +
+                "<wave>wavy</wave> text with a <link=https://prowlengine.com>link</link>.";
+
+RichTextParseResult parsed = RichTextParser.Parse(source);
+// parsed.VisibleText — the source with all tags stripped
+// parsed.Styles     — List<RichStyleSpan> for static styling
+// parsed.Effects    — List<RichEffectSpan> for animated effects
+// parsed.Warnings   — parsing diagnostics for malformed tags
+```
+
+Supported tags:
+
+| Tag | Effect |
+|---|---|
+| `[b]` / `</b>` | Bold |
+| `[i]` / `</i>` | Italic |
+| `[u]` / `</u>` | Underline |
+| `[s]` / `</s>` | Strikethrough |
+| `[mono]` | Monospace font |
+| `[color=#RRGGBB]` | Colour override (hex or named) |
+| `[size=N]` | Pixel size override |
+| `[link=url]` | Clickable link span |
+| `[wave]` | Wave animation effect |
+| `[shake]` | Shake animation effect |
+| `[rainbow]` | Rainbow colour cycle |
+| `[pulse]` | Pulse opacity effect |
+| `[fade]` | Fade effect |
+| `[jitter]` | Per-character jitter |
+| `[typewriter]` | Typewriter reveal |
+
+`RichStyleFlags` is a `[Flags]` byte enum (`Bold`, `Italic`, `Underline`, `Strike`, `Mono`, `Link`). `RichEffectKind` enumerates all animated effects.
+
+```csharp
+RichTextLayoutSettings richSettings = new RichTextLayoutSettings
+{
+    BaseSettings = settings,
+    BoldFont     = fs.GetFont("Arial", FontStyle.Bold),
+    ItalicFont   = fs.GetFont("Arial", FontStyle.Italic),
+    MonoFont     = fs.GetFont("Consolas", FontStyle.Regular),
+};
+
+RichTextLayout richLayout = RichTextLayout.Build(parsed, fs, richSettings);
+// richLayout.Lines — List<RichLine> with RichGlyph entries
+// RichGlyph carries the GlyphInstance plus the active RichStyleFlags and color.
+```
+
+Animated effects are applied at draw time through `RichTextEffects`, which takes the current elapsed time and returns per-glyph `RichEffectResult` offsets and colour multipliers.
+
+## Markdown
+
+Scribe includes a lightweight Markdown parser that produces an AST, and a `MarkdownLayoutEngine` that converts that AST into a flat `MarkdownDisplayList` of draw operations:
+
+```csharp
+// Parse Markdown source into an AST
+MarkdownDocument document = Markdown.Parse(markdownSource);
+
+// Configure which fonts to use for each role
+MarkdownLayoutSettings mdSettings = MarkdownLayoutSettings.Default(
+    body:      fs.GetFont("Arial",    FontStyle.Regular),
+    mono:      fs.GetFont("Consolas", FontStyle.Regular),
+    bold:      fs.GetFont("Arial",    FontStyle.Bold),
+    italic:    fs.GetFont("Arial",    FontStyle.Italic),
+    boldItalic:fs.GetFont("Arial",    FontStyle.BoldItalic),
+    width:     400);
+
+// Layout relative to (0, 0)
+IMarkdownImageProvider imageProvider = new MyImageProvider();
+MarkdownDisplayList displayList =
+    MarkdownLayoutEngine.Layout(document, fs, mdSettings, imageProvider);
+
+// Render at a world position
+MarkdownLayoutEngine.Render(displayList, fs, renderer, position: new Float2(20, 40), mdSettings);
+
+// Hit-test links
+if (MarkdownLayoutEngine.TryGetLinkAt(displayList, mousePos, position, out string? href))
+    OpenUrl(href!);
+```
+
+The `MarkdownDisplayList` holds a flat `IReadOnlyList<IDrawOp>` of three operation types:
+
+| `IDrawOp` | Fields | Description |
+|---|---|---|
+| `DrawText` | `Text`, `Position`, `Font`, `PixelSize`, `Color` | A single text run at a position |
+| `DrawQuad` | `Bounds` (`RectangleF`), `Color` | Solid coloured rectangle (rules, blockquote bars) |
+| `DrawImage` | `Bounds`, `ImageKey` | An image placeholder resolved by `IMarkdownImageProvider` |
+
+The AST uses `BlockKind` (Paragraph, Heading1–6, Code, Blockquote, ListItem, ThematicBreak, Table, etc.) and `InlineKind` (Text, Strong, Emphasis, Code, Link, Image, LineBreak, etc.) enums for all nodes.
+
+## Glyph Metrics
+
+Query per-glyph metrics from a `FontFile` for custom layout or hit-testing:
+
+```csharp
+FontFile font = fs.GetFont("Arial", FontStyle.Regular);
+
+// Raw metrics for a codepoint at a given quality level.
+GlyphMetrics metrics = font.GetGlyphMetrics('A', FontQuality.Normal);
+// metrics.AdvanceWidth, metrics.LeftBearing, metrics.RightBearing,
+// metrics.Width, metrics.Height, metrics.YOffset
+
+// Kerning between two codepoints.
+float kern = font.GetKerning('A', 'V', pixelSize: 18f);
+
+// Scaled vertical metrics (ascent, descent, line gap).
+(float ascent, float descent, float lineGap) = font.GetScaledVMetrics(pixelSize: 18f);
+```
+
+`GlyphMetrics` is a lightweight struct; all values are in pixel-space at the rasterisation quality you specify.
+
+## Atlas Management
+
+The glyph atlas is managed by a `BinPacker` that uses a skyline bottom-left algorithm. Atlas growth is governed by these `FontSystem` properties:
+
+```csharp
+fs.AllowExpansion = true;    // Enable automatic atlas resizing
+fs.MaxAtlasSize   = 4096;    // Maximum atlas texture side length
+fs.Padding        = 1;       // Margin between packed glyphs in texels
+```
+
+When the atlas is exhausted and `AllowExpansion` is `true`, the atlas texture is recreated at `ExpansionFactor` times its current size (capped at `MaxAtlasSize × MaxAtlasSize`), all glyphs are repacked, and `AtlasVersion` is incremented. When `AllowExpansion` is `false`, packing new glyphs beyond capacity silently drops them.
+
+<Note>
+Check `FontSystem.AtlasVersion` each frame and invalidate any cached `TextLayout` objects whose stamped version is stale. `TextLayout.EnsureUpToDate(fontSystem)` does this check automatically.
+</Note>

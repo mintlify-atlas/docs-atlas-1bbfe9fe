@@ -1,0 +1,117 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Prowl Anthology",
+  "projectDescription": "A collection of modular, independently-installable C# NuGet libraries powering the Prowl game engine — covering math, rendering, UI, physics, networking, serialization, and more.",
+  "theme": "aspen",
+  "primaryColor": "#6C63FF",
+  "lightColor": "#EDE9FF",
+  "darkColor": "#1A1730",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "packages"
+            ]
+          },
+          {
+            "group": "Math & Geometry",
+            "pages": [
+              "libraries/vector"
+            ]
+          },
+          {
+            "group": "Rendering & Graphics",
+            "pages": [
+              "libraries/graphite",
+              "libraries/quill",
+              "libraries/scribe",
+              "libraries/slang",
+              "libraries/aperture"
+            ]
+          },
+          {
+            "group": "User Interface",
+            "pages": [
+              "libraries/paper",
+              "libraries/origami",
+              "libraries/scaffold"
+            ]
+          },
+          {
+            "group": "Engine Systems",
+            "pages": [
+              "libraries/echo",
+              "libraries/clay",
+              "libraries/drift",
+              "libraries/recast",
+              "libraries/photonic",
+              "libraries/unwrapper",
+              "libraries/wicked",
+              "libraries/rosetta",
+              "libraries/crumb",
+              "libraries/ember"
+            ]
+          },
+          {
+            "group": "Contributing",
+            "pages": [
+              "contributing/monorepo",
+              "contributing/merging-libraries"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "23 independently-installable Prowl.* NuGet packages under a single version",
+    "Prowl.Vector — comprehensive 32/64-bit math with vectors, matrices, quaternions, noise, CSG, and BVH",
+    "Prowl.Graphite — low-level Vulkan/D3D11 GPU abstraction with declarative render graph",
+    "Prowl.Quill — hardware-accelerated anti-aliased 2D vector graphics canvas with SVG support",
+    "Prowl.Paper — immediate-mode UI framework with animations, transitions, and event bubbling",
+    "Prowl.Origami — full immediate-mode widget library with charts, docking, and 3D gizmos",
+    "Prowl.Echo — high-performance serializer with source generation beating System.Text.Json",
+    "Prowl.Clay — pure-C# 3D model importer for glTF 2.0, FBX, and OBJ with post-process pipeline",
+    "Prowl.Wicked — IL-weaved authoritative networking with RPCs, SyncVars, and TCP transport",
+    "Prowl.Drift — 2D rigid body physics with SAT collision and 8 joint types",
+    "Prowl.Aperture — dependency-free image loader supporting 14 formats",
+    "Prowl.Ember — live hot-reload migration of object graphs including closures and cycles",
+    "Prowl.Recast — navmesh generation and pathfinding (DotRecast port)",
+    "Prowl.Photonic — CPU path-traced lightmap baker with BVH4/AVX2 acceleration",
+    "Prowl.Scribe — TrueType font parser, layout engine, rich text, and Markdown renderer",
+    "Prowl.Rosetta — localization with CLDR plurals, gender forms, and layered providers",
+    "Prowl.Slang — managed .NET bindings for the Slang shader compiler",
+    "Prowl.Crumb — zero-allocation span-based tokenizer/lexer engine",
+    "Prowl.Scaffold — allocation-free incremental UI layout engine",
+    "Prowl.Unwrapper — mesh UV unwrapper (Projection and Conformal/LSCM modes)"
+  ],
+  "publicApiSurface": [
+    "Prowl.Vector — Double2/3/4, Float2/3/4, Int2/3/4, Quaternion, Maths, AnimationCurve, AABB, GJK, BVH, GeometryData, GeometryCSG",
+    "Prowl.Graphite — GraphicsDevice, CommandBuffer, ShaderProgram, PropertySet, RenderPipeline<T>, IPass<T>, ExecutionTask",
+    "Prowl.Graphite.ShaderDef — ShaderDef markup parser and variant runtime",
+    "Prowl.Graphite.ShaderDef.Compiler — Slang-based shader compiler integration",
+    "Prowl.Quill — Canvas, ICanvasRenderer, SVGParser, SVGRenderer, FontAtlasSettings",
+    "Prowl.Paper — Paper, ElementBuilder, UnitValue, Easing, BoxShadow, WindowManager",
+    "Prowl.Origami — Origami (static), OrigamiTheme, DockSpace, DockPanel, Chart, TransformGizmo",
+    "Prowl.Scaffold — LayoutTree, NodeId, Style, Length, MeasureContent",
+    "Prowl.Echo — Serializer, EchoObject, ISerializable, [GenerateSerializer], [FixedEchoStructure], Cloner",
+    "Prowl.Clay — ModelImporter, Model, ModelImporterSettings, PostProcessFlags, Mesh, Material, AnimationClip",
+    "Prowl.Scribe — FontSystem, FontFile, IFontRenderer, TextLayout, RichTextParser, MarkdownLayoutEngine",
+    "Prowl.Drift — Space, Body, ShapeCircle, ShapePoly, RevoluteJoint, DistanceJoint",
+    "Prowl.Recast — RcBuilder, RcConfig, DtNavMesh, DtNavMeshQuery, DtCrowd",
+    "Prowl.Photonic — LightmapBaker, BakeScene, BakeMesh, LightmapTarget, BakeOptions",
+    "Prowl.Aperture — Image.Load(), ImageFrame, ImageInfo, DecodeOptions, PixelFormat",
+    "Prowl.Wicked — Server (static), Client (static), NetworkEntity, SyncVar<T>, [EntityCommand], [EntityRpc]",
+    "Prowl.Rosetta — Loc (static), LocConfig, ILocalizationProvider, JsonFileProvider",
+    "Prowl.Slang — GlobalSession, Session, Module, EntryPoint, ComponentType, CompileTarget",
+    "Prowl.Crumb — Tokenizer<TKind>, TokenizerRules<TKind>, Token<TKind>, TokenRule<TKind>",
+    "Prowl.Unwrapper — UnwrapMesh, UnwrapResult, UnwrapOptions, UnwrapMethod",
+    "Prowl.Ember — ReloadEngine, ReloadRequest, ReloadReport, IReloadAware, [ReloadIgnore]"
+  ]
+}

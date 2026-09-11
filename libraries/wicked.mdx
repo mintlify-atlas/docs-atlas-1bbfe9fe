@@ -1,0 +1,445 @@
+---
+title: "Prowl.Wicked: IL-Weaved Authoritative Multiplayer Networking"
+sidebarTitle: "Wicked"
+description: "Prowl.Wicked provides client-server networking with IL-weaved RPCs, automatic SyncVar replication, observation-scoped Maps, and TCP transport for .NET."
+---
+
+Prowl.Wicked is an authoritative client-server networking library for the Prowl game engine. It gives you RPCs, automatic field replication, and observation-scoped entity containers without source generators or manually written serialization stubs — a post-build IL weaver rewrites annotated methods directly in your compiled assembly, so network plumbing stays invisible in your source code. The wire protocol is binary little-endian over a length-prefixed TCP framing layer, with a pluggable transport interface for custom transports.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Wicked
+```
+
+<Note>
+The NuGet package bundles MSBuild targets that run the IL weaver `AfterTargets="Build"` automatically. No manual project configuration is required. To opt out for a specific project, set `<ProwlWickedWeave>false</ProwlWickedWeave>` in your `.csproj`.
+</Note>
+
+## How IL Weaving Works
+
+Methods annotated with `[EntityCommand]`, `[EntityRpc]`, `[MapRpc]`, `[StaticCommand]`, or `[StaticRpc]` are rewritten after compilation. The weaver moves the original method body to an internal `__UserCode_*` helper and replaces the original method with a marshalling stub. On the calling side the stub serializes arguments and sends them over the wire; on the receiving side it deserializes arguments and invokes the original code. PDB files are also rewritten so debugger breakpoints survive the transformation.
+
+The result is that you write and call methods as plain C# — the network plumbing does not appear in your source tree.
+
+## Server Setup
+
+The static `Server` class is the single server entry point. Call `Start` once, drive the loop with `Tick`, and shut down with `Stop`.
+
+```csharp
+using Prowl.Wicked;
+
+Server.OnClientConnected    += client => Console.WriteLine($"Client {client.ClientId} joined");
+Server.OnClientDisconnected += client => Console.WriteLine($"Client {client.ClientId} left");
+
+Server.OnClientAuthenticate += (client, token) =>
+{
+    string? userId = MyAuth.Validate(token);
+    if (userId != null)
+        Server.AcceptAuthentication(client, userId);
+    else
+        Server.RejectAuthentication(client, "Invalid token");
+};
+
+Server.Start(7777);
+var lobby = Server.CreateMap<LobbyMap>();
+
+while (running)
+{
+    Server.Tick();
+    Thread.Sleep(16);
+}
+
+Server.Stop();
+```
+
+<ParamField body="Server.Start(int port)" type="void">
+  Binds the built-in `TcpServerTransport` on the given port and begins accepting connections.
+</ParamField>
+
+<ParamField body="Server.Tick()" type="void">
+  Processes one frame: receives incoming packets, fires callbacks, flushes outgoing state updates. Call once per game tick.
+</ParamField>
+
+<ParamField body="Server.CreateMap&lt;T&gt;()" type="T">
+  Allocates and registers a new Map instance. Maps define observation scope — clients observe a map by having a `PlayerEntity` assigned inside it.
+</ParamField>
+
+<ParamField body="Server.Spawn&lt;T&gt;(Map, RemoteClient?, Action&lt;T&gt;?)" type="T">
+  Spawns a `NetworkEntity` subclass into a map with an optional owner and initializer callback. Fires `OnSpawn`, `OnStartServer`, and `OnStartClient` (on observers) in that order.
+</ParamField>
+
+<ParamField body="Server.Reset()" type="void">
+  Disconnects all clients, despawns entities, destroys maps, and unwires the transport. Primarily for test isolation.
+</ParamField>
+
+## Client Setup
+
+The static `Client` class is the single client entry point.
+
+```csharp
+Client.AuthToken   = "bearer-abc123";
+Client.OnConnected    += () => Console.WriteLine("Connected");
+Client.OnAuthenticated += () => Console.WriteLine("Auth OK");
+Client.OnAuthRejected  += reason => Console.WriteLine($"Auth failed: {reason}");
+
+Client.Connect("127.0.0.1", 7777);
+
+while (running)
+{
+    Client.Tick();
+    // render frame…
+}
+
+Client.Disconnect();
+```
+
+<ParamField body="Client.ServerTime" type="double">
+  Estimated server clock time, EMA-smoothed over recent Ping/Pong samples.
+</ParamField>
+
+<ParamField body="Client.RoundTripTime" type="double">
+  Smoothed round-trip time in seconds.
+</ParamField>
+
+<ParamField body="Client.StandardDeviation" type="double">
+  RTT jitter (square root of EMA variance).
+</ParamField>
+
+## NetworkEntity
+
+`NetworkEntity` is the abstract base class for all replicated objects. Override the lifecycle callbacks that your entity needs.
+
+```csharp
+public class EnemyEntity : NetworkEntity
+{
+    public SyncVar<float> Health = new(100f);
+    public SyncVar<string> Name  = new("Enemy");
+
+    public override void OnSpawn()       { /* first callback on both sides */ }
+    public override void OnStartServer() { /* server-side initialization    */ }
+    public override void OnStartClient() { /* client-side initialization    */ }
+    public override void OnStartOwner()  { /* only on the owning client      */ }
+
+    public override void ServerTick()    { /* per-tick logic, server only    */ }
+    public override void ClientTick()    { /* per-tick logic, client only    */ }
+
+    public override void OnOwnerChanged()  { /* new owner assigned             */ }
+    public override void OnMapChanged()    { /* entity moved between maps      */ }
+    public override void OnDespawn()       { /* entity about to be destroyed   */ }
+}
+```
+
+## Maps — Observation Scoping
+
+A `Map` is a container that defines who replicates what. A client observes a map by having its `PlayerEntity` assigned inside it. Override `OnObserverEnter/Leave` for welcome logic and `OnEntityEnter/Leave` for spatial indexing.
+
+```csharp
+public class ArenaMap : Map
+{
+    public override void OnObserverEnter(RemoteClient client)
+    {
+        // send the client the current weather state, etc.
+    }
+
+    public override void OnEntityEnter(NetworkEntity entity)
+    {
+        // add to spatial hash for proximity queries
+    }
+
+    public override void OnObserverLeave(RemoteClient client) { }
+    public override void OnEntityLeave(NetworkEntity entity)  { }
+}
+```
+
+Call `Map.TransferEntity(entity, targetMap)` to move a player entity between maps — the framework handles despawn on the old map and spawn on the new map with correct observer handoff.
+
+## RPCs — IL Weaving
+
+Annotate normal C# methods with an RPC attribute. The weaver replaces the body at post-build time. You call them like ordinary methods.
+
+### [EntityCommand] — Client → Server
+
+`[EntityCommand]` methods run on the server when a client calls them on their local entity proxy. By default only the owning client can invoke the command. Set `RequireOwner = false` to allow any observer to call it.
+
+```csharp
+public class PlayerEntity : NetworkEntity
+{
+    [EntityCommand]
+    public void CmdMove(float x, float y)
+    {
+        // Runs on the server. Validate and apply movement.
+        _targetX = Math.Clamp(x, 0, MapWidth);
+        _targetY = Math.Clamp(y, 0, MapHeight);
+    }
+
+    [EntityCommand(RequireOwner = false)]
+    public RpcPromise<int> CmdQueryGold()
+    {
+        return Gold.Value; // implicit conversion to RpcPromise<int>
+    }
+}
+
+// Client side
+localPlayer.CmdMove(mouseX, mouseY);
+```
+
+### [EntityRpc] — Server → Client
+
+`[EntityRpc]` methods are called on the server and delivered to clients based on `Target`.
+
+```csharp
+public class PlayerEntity : NetworkEntity
+{
+    // Delivered to every observer of this entity
+    [EntityRpc(Target = RpcTarget.Observers)]
+    public void RpcPlayEmote(byte emoteId) { /* play animation */ }
+
+    // Delivered to the owning client only
+    [EntityRpc(Target = RpcTarget.Owner)]
+    public void RpcLevelUp(int newLevel) { /* show level-up UI */ }
+
+    // Delivered to a specific client (first parameter is consumed for routing)
+    [EntityRpc(Target = RpcTarget.Player)]
+    public void RpcWhisper(RemoteClient target, string message) { }
+
+    // Observers excluding the owner (who already processed it locally)
+    [EntityRpc(Target = RpcTarget.Observers, ExcludeOwner = true)]
+    public void RpcMuzzleFlash() { }
+}
+```
+
+### [MapRpc] — Server → Map Observers
+
+`[MapRpc]` methods broadcast to all observers of a map or to a specific player.
+
+```csharp
+public class ArenaMap : Map
+{
+    [MapRpc(Target = RpcTarget.Observers)]
+    public void RpcWeatherChanged(byte weatherId) { /* all observers */ }
+
+    [MapRpc(Target = RpcTarget.Player)]
+    public void RpcPrivateNotice(RemoteClient target, string msg) { }
+}
+```
+
+### [StaticCommand] / [StaticRpc] — Non-Entity Messages
+
+Use static methods for auth, lobby, matchmaking, or any message not tied to an entity.
+
+```csharp
+public static class LobbyRpcs
+{
+    [StaticCommand]
+    public static void CmdJoinQueue(string region)
+    {
+        var sender = NetworkObject.Sender; // server-side, who called this
+        Matchmaker.Enqueue(sender!, region);
+    }
+
+    [StaticRpc]
+    public static void RpcMatchFound(RemoteClient target, Guid matchId)
+    {
+        // Runs on the targeted client
+        Console.WriteLine($"Match found: {matchId}");
+    }
+}
+
+// Client side
+LobbyRpcs.CmdJoinQueue("eu-west");
+```
+
+## SyncVar&lt;T&gt;
+
+`SyncVar<T>` is a replicated field discovered via reflection at spawn time. Supported types include all primitives, `string`, `Guid`, `Vector2`, enums, and any `INetworkSerializable`.
+
+```csharp
+public class PlayerEntity : NetworkEntity
+{
+    // Replicated to all observers, at most once per tick
+    public SyncVar<float>  Health = new(100f);
+
+    // Replicated to the owner only, rate-limited to 20 Hz
+    public SyncVar<int>    Gold   = new(0, SyncTarget.Owner) { SyncInterval = 0.05f };
+
+    public SyncVar<string> Name   = new("");
+
+    public override void OnStartClient()
+    {
+        Health.OnChanged((oldHp, newHp) =>
+            Console.WriteLine($"HP changed: {oldHp} → {newHp}"));
+    }
+}
+```
+
+<ParamField body="SyncVar&lt;T&gt;.Value" type="T">
+  Read and write the authoritative value. Writing on the server schedules a replication update.
+</ParamField>
+
+<ParamField body="SyncVar&lt;T&gt;.SyncInterval" type="float">
+  Minimum seconds between updates for this field. `0` sends every tick. Default `0`.
+</ParamField>
+
+<ParamField body="SyncVar&lt;T&gt;.SyncTarget" type="SyncTarget">
+  `Observers` (default) replicates to all observers. `Owner` replicates only to the owning client.
+</ParamField>
+
+## SyncVarInterpolated
+
+`SyncVarInterpolated` smooths a float value on the client using an exponential moving average, reducing the visual impact of network jitter.
+
+```csharp
+public class CharacterEntity : NetworkEntity
+{
+    // Position replicated at 20 Hz, smoothed at speed 15 on the client
+    public SyncVarInterpolated X = new(0f, interpSpeed: 15f) { SyncInterval = 0.05f };
+    public SyncVarInterpolated Y = new(0f, interpSpeed: 15f) { SyncInterval = 0.05f };
+
+    // In your render loop:
+    // float renderX = entity.X.Display; // smoothed display value
+    // float authX   = entity.X.Value;   // latest authoritative value
+
+    public override void OnSpawn()
+    {
+        // Snap to spawn position without lerping from the default
+        X.ResetInterpolation();
+        Y.ResetInterpolation();
+    }
+}
+```
+
+`SyncVarInterpolatedVector2` offers the same smoothing for 2D position as a single field.
+
+## RpcPromise
+
+Commands can return `RpcPromise` or `RpcPromise<T>` to receive a reply from the server. Chain `.Then()`, `.Catch()`, `.Finally()`, and `.Timeout()` for promise-based async handling.
+
+```csharp
+// On the entity (server-side body)
+[EntityCommand(RequireOwner = false)]
+public RpcPromise<string> CmdGetServerStatus()
+{
+    return $"Online — {Server.PlayerCount} players";
+}
+
+// On the client
+entity.CmdGetServerStatus()
+    .Then(status  => statusLabel.Text = status)
+    .Catch(error  => Console.Error.WriteLine(error.Message))
+    .Finally(()   => loadingSpinner.Hide())
+    .Timeout(5f);
+```
+
+## RemoteClient
+
+`RemoteClient` is the server-side handle for a connected client.
+
+<ParamField body="RemoteClient.ClientId" type="uint">
+  Stable numeric identifier for the connection lifetime.
+</ParamField>
+
+<ParamField body="RemoteClient.IsAuthenticated" type="bool">
+  True after `Server.AcceptAuthentication` has been called for this client.
+</ParamField>
+
+<ParamField body="RemoteClient.UserId" type="string?">
+  The application-level user identifier passed to `AcceptAuthentication`.
+</ParamField>
+
+<ParamField body="RemoteClient.UserData" type="object?">
+  Arbitrary per-session state slot for application data (session tokens, rank, etc.).
+</ParamField>
+
+<ParamField body="RemoteClient.AssignPlayerEntity(NetworkEntity)" type="void">
+  Assigns a `PlayerEntity` to this client, making the client observe the entity's map.
+</ParamField>
+
+## Custom Serialization
+
+Implement `INetworkSerializable` to pass complex structs as RPC arguments or `SyncVar` payloads.
+
+```csharp
+public struct Loadout : INetworkSerializable
+{
+    public int WeaponId;
+    public byte[] ModIds;
+
+    public void Serialize(NetworkWriter writer)
+    {
+        writer.WriteInt(WeaponId);
+        writer.WriteByteArray(ModIds);
+    }
+
+    public void Deserialize(NetworkReader reader)
+    {
+        WeaponId = reader.ReadInt();
+        ModIds   = reader.ReadByteArray()!;
+    }
+}
+
+// Usable in RPCs and SyncVars
+[EntityRpc(Target = RpcTarget.Owner)]
+public void RpcSetLoadout(Loadout loadout) { /* … */ }
+```
+
+## Transport Layer
+
+The built-in `TcpServerTransport` and `TcpClientTransport` use length-prefixed framing, non-blocking I/O, and Nagle disabled. Replace them by implementing the transport interfaces.
+
+```csharp
+// Plug in a custom transport before calling Connect / Start
+Client.Transport = new MyRelayClientTransport(relayUrl);
+Server.Transport = new MyRelayServerTransport(relayUrl);
+```
+
+<ParamField body="IServerTransport" type="interface">
+  Responsible for accepting connections, framing incoming byte buffers, and flushing outgoing ones. The protocol lives above this interface.
+</ParamField>
+
+<ParamField body="IClientTransport" type="interface">
+  Client-side counterpart: connect, disconnect, send frame, and receive frames.
+</ParamField>
+
+## Complete Example
+
+A minimal `NetworkEntity` with a `SyncVar` and an `EntityCommand`:
+
+```csharp
+using Prowl.Wicked;
+
+public class HeroEntity : NetworkEntity
+{
+    // Health replicated to all observers
+    public SyncVar<float> Health = new(100f);
+
+    // Gold private to owner
+    public SyncVar<int> Gold = new(0, SyncTarget.Owner);
+
+    public override void OnStartClient()
+    {
+        Health.OnChanged((old, now) =>
+            healthBar.SetValue(now / 100f));
+    }
+
+    // Client calls this; server validates and applies
+    [EntityCommand]
+    public void CmdSpendGold(int amount)
+    {
+        if (Gold.Value < amount) return;
+        Gold.Value -= amount;
+        // apply purchase…
+    }
+
+    // Server broadcasts a hit to all observers
+    [EntityRpc(Target = RpcTarget.Observers)]
+    public void RpcTakeDamage(float damage)
+    {
+        Health.Value = Math.Max(0f, Health.Value - damage);
+        if (Health.Value <= 0f)
+            SpawnDeathFx();
+    }
+
+    private void SpawnDeathFx() { /* … */ }
+}
+```

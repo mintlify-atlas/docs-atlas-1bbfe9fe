@@ -1,0 +1,212 @@
+---
+title: "Prowl.Recast: Navmesh Generation and Pathfinding for .NET"
+sidebarTitle: "Recast"
+description: "Prowl.Recast ports DotRecast into a single Prowl.Recast assembly covering navmesh baking, A-star pathfinding, crowd simulation, and tile streaming."
+---
+
+Prowl.Recast is a single-assembly port of [DotRecast](https://github.com/ikpil/DotRecast) — itself a faithful C# translation of the industry-standard [recastnavigation](https://github.com/recastnavigation/recastnavigation) library powering AI navigation in Unity, Unreal, Godot, O3DE, and countless games. Eight upstream DotRecast projects (`Core`, `Recast`, `Detour`, `Detour.Crowd`, `Detour.Dynamic`, `Detour.TileCache`, `Detour.Extras`, `Recast.Toolset`) are compiled into a single `Prowl.Recast` package. Type names (`Rc*`, `Dt*`) are preserved verbatim from the upstream; only the root namespace changes from `DotRecast.*` to `Prowl.Recast.*`. The dependency on Newtonsoft.Json (used only for A* Pathfinding Project import) is dropped entirely.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Recast
+```
+
+## Sub-namespaces
+
+| Namespace | Contents |
+|---|---|
+| `Prowl.Recast.Core` | Math (`RcVec3f`, `RcVec2f`, `RcMatrix4x4f`), collections (`RcObjectPool<T>`, `RcBinaryMinHeap<T>`, fixed arrays), `RcContext`, `IRcCompressor` |
+| `Prowl.Recast` | Navmesh baking: `RcBuilder`, `RcConfig`, `RcHeightfield`, `RcCompactHeightfield`, `RcContourSet`, `RcPolyMesh`, `RcPolyMeshDetail` |
+| `Prowl.Recast.Detour` | Runtime pathfinding: `DtNavMesh`, `DtNavMeshQuery`, `DtPathUtils`, `DtQueryDefaultFilter` |
+| `Prowl.Recast.Detour.Crowd` | Agent simulation: `DtCrowd`, `DtCrowdAgent`, `DtCrowdAgentParams`, `DtCrowdConfig` |
+| `Prowl.Recast.Detour.TileCache` | Tile streaming: `DtTileCache` for large open worlds |
+| `Prowl.Recast.Detour.Dynamic` | Runtime obstacle add/remove: `DtDynamicNavMesh`, collider types |
+| `Prowl.Recast.Geom` | Input geometry helpers: `IRcInputGeomProvider`, `RcSimpleInputGeomProvider` |
+
+## Navmesh Generation
+
+Recast builds navigation meshes through a multi-stage voxelization pipeline. Configure the bake with `RcConfig`, then pass it to `RcBuilder`.
+
+```csharp
+using Prowl.Recast;
+using Prowl.Recast.Core;
+using Prowl.Recast.Core.Numerics;
+using Prowl.Recast.Geom;
+
+// 1. Describe bake parameters
+var cfg = new RcConfig(
+    useTiles:               false,
+    tileSizeX:              0,
+    tileSizeZ:              0,
+    borderSize:             3,
+    partition:              RcPartition.WATERSHED,
+    cs:                     0.3f,          // cell size (XZ)
+    ch:                     0.2f,          // cell height (Y)
+    walkableSlopeAngle:     45f,
+    walkableHeight:         2,             // voxels
+    walkableClimb:          1,
+    walkableRadius:         1,
+    maxEdgeLen:             12,
+    maxSimplificationError: 1.3f,
+    minRegionArea:          8,
+    mergeRegionArea:        20,
+    maxVertsPerPoly:        6,
+    detailSampleDist:       6f,
+    detailSampleMaxError:   1f,
+    filterLowHangingObstacles:  true,
+    filterLedgeSpans:           true,
+    filterWalkableLowHeightSpans: true
+);
+
+// 2. Supply geometry — wrap your triangle soup
+var geom = new RcSimpleInputGeomProvider(vertices, indices);
+
+// 3. Build — returns a list of RcBuilderResult (one per tile, or one for solo)
+var builder = new RcBuilder();
+var ctx     = new RcContext();
+RcBuilderResult result = builder.Build(geom, cfg, keepInterResults: false, ctx);
+
+// 4. Inspect intermediate products if needed
+RcPolyMesh       polyMesh   = result.Mesh;
+RcPolyMeshDetail detailMesh = result.MeshDetail;
+```
+
+The bake pipeline stages in order: **rasterization** (input triangles → `RcHeightfield`) → **filtering** (remove non-walkable spans) → **region** (watershed or monotone partitioning → `RcCompactHeightfield`) → **contour** (trace boundary → `RcContourSet`) → **polygon mesh** (`RcPolyMesh`) → **detail mesh** (`RcPolyMeshDetail`).
+
+## Pathfinding
+
+Create a `DtNavMesh` from the baked poly mesh data, then query paths with `DtNavMeshQuery`.
+
+```csharp
+using Prowl.Recast.Detour;
+
+// Build runtime nav mesh from the bake result
+DtNavMeshCreateParams navParams = new DtNavMeshCreateParams();
+// ... populate from polyMesh / detailMesh fields ...
+DtNavMesh navMesh = DtNavMeshBuilder.CreateNavMesh(navParams);
+
+// Create a query object
+var query  = new DtNavMeshQuery(navMesh);
+var filter = new DtQueryDefaultFilter();
+
+// Find nearest polygon refs for start and end positions
+RcVec3f startPos = new RcVec3f(0f, 0f, 0f);
+RcVec3f endPos   = new RcVec3f(20f, 0f, 15f);
+RcVec3f extents  = new RcVec3f(1f, 1f, 1f);
+
+query.FindNearestPoly(startPos, extents, filter, out long startRef, out _, out _);
+query.FindNearestPoly(endPos,   extents, filter, out long endRef,   out _, out _);
+
+// Run A* path query
+Span<long> path = stackalloc long[256];
+query.FindPath(startRef, endRef, startPos, endPos, filter, ref path, out int pathCount,
+               maxPath: 256);
+
+// Smooth the polygon path into a walkable corridor
+Span<RcVec3f> smoothPath = stackalloc RcVec3f[2048];
+// ... use DtPathUtils.MergeCorridorStartMoved / SteerTarget helpers ...
+```
+
+`DtNavMeshQuery` also provides `FindRandomPoint`, `Raycast`, `GetPolyWallSegments`, and `FindPolysAroundCircle` for common navigation queries.
+
+## Crowd Simulation
+
+`DtCrowd` manages a pool of agents that navigate, avoid each other using ORCA (Optimal Reciprocal Collision Avoidance), and follow paths on the navmesh.
+
+```csharp
+using Prowl.Recast.Detour.Crowd;
+
+var crowdCfg = new DtCrowdConfig(maxAgentRadius: 0.6f);
+var crowd     = new DtCrowd(crowdCfg, navMesh);
+
+// Configure an agent
+var agentParams = new DtCrowdAgentParams
+{
+    radius             = 0.4f,
+    height             = 1.8f,
+    maxAcceleration    = 8f,
+    maxSpeed           = 3.5f,
+    collisionQueryRange = 1.2f,
+    pathOptimizationRange = 30f,
+    separationWeight   = 2f,
+};
+
+// Spawn at a world position
+DtCrowdAgent agent = crowd.AddAgent(
+    new RcVec3f(0f, 0f, 0f), agentParams);
+
+// Request movement to a target
+crowd.RequestMoveTarget(agent, endRef, endPos);
+
+// Drive the simulation each frame
+var debug = new DtCrowdAgentDebugInfo();
+crowd.Update(deltaTime: 1f / 60f, debug);
+
+// Read back the agent's current position for rendering
+RcVec3f pos = agent.npos;
+```
+
+Key `DtCrowd` methods: `AddAgent`, `RemoveAgent`, `UpdateAgentParameters`, `RequestMoveTarget`, `RequestMoveVelocity`, `ResetMoveTarget`, `GetActiveAgents`, `Update`.
+
+`DtCrowdAgentState` values: `DT_CROWDAGENT_STATE_INVALID`, `DT_CROWDAGENT_STATE_WALKING`, `DT_CROWDAGENT_STATE_OFFMESH`.
+
+## Tile Streaming
+
+`DtTileCache` enables navmesh streaming for large open-world games. Tiles are built offline and loaded/unloaded at runtime as the player moves through the world.
+
+```csharp
+using Prowl.Recast.Detour.TileCache;
+
+// Create a tile cache with a compressor and mesh processor
+var tcParams = new DtTileCacheParams { /* ... */ };
+var tileCache = new DtTileCache(tcParams, new DtTileCacheStorageParams(),
+    navMesh, compressor, meshProc);
+
+// Load a pre-baked tile from disk
+byte[] tileData = File.ReadAllBytes($"tiles/{tx}_{tz}.tile");
+tileCache.AddTile(tileData, DtTileFlags.DT_COMPRESSEDTILE_FREE_DATA, out long tileRef);
+
+// Update the tile cache — processes pending re-bake requests
+tileCache.Update(deltaTime: 0f, navMesh, out bool upToDate);
+```
+
+Unloading is handled by `tileCache.RemoveTile(tileRef)`.
+
+## Dynamic Obstacles
+
+Add and remove obstacles on the navmesh at runtime with the `DtDynamic` module. Obstacles are described as geometric volumes that punch holes into or fill previously walkable areas.
+
+```csharp
+using Prowl.Recast.Detour.Dynamic;
+
+// Create a dynamic navmesh from a voxel file or tile data
+var dynNavMesh = new DtDynamicNavMesh(dynNavMeshData);
+
+// Add a box obstacle (e.g. a fallen crate)
+long obstacleRef = dynNavMesh.AddCollider(
+    new DtBoxCollider(center, halfExtents, transform));
+
+// Rebuild the affected tiles (can be done async)
+bool done = dynNavMesh.Update(out _);
+
+// Remove the obstacle later
+dynNavMesh.RemoveCollider(obstacleRef);
+```
+
+## Core Utilities
+
+| Type | Purpose |
+|---|---|
+| `RcContext` | Logging and performance timing for the bake pipeline |
+| `RcVec3f` | 3-component float vector with full math operators |
+| `RcVec2f` | 2-component float vector |
+| `RcObjectPool<T>` | Lock-free object pool for reducing GC pressure in the detour runtime |
+| `RcBinaryMinHeap<T>` | Binary min-heap used by A* internally; reusable for custom searches |
+| `RcFixedArray1<T>` … `RcFixedArray1024<T>` | Stack-allocated fixed-size arrays (unmanaged constraint) |
+| `RcLogCategory` | `RC_LOG_PROGRESS`, `RC_LOG_WARNING`, `RC_LOG_ERROR` |
+| `IRcCompressor` | Interface for tile-data compression (ZSTD, LZ4, etc.) |
+
+<Info>
+Prowl.Recast is licensed under the ZLib license, matching the original recastnavigation and DotRecast projects. See `LICENSE.txt` in the package for details.
+</Info>

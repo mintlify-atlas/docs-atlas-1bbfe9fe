@@ -1,0 +1,574 @@
+---
+title: "Prowl.Paper: Immediate-Mode GPU UI with Animations and Events"
+sidebarTitle: "Paper"
+description: "Prowl.Paper is an IMGUI framework built on Quill, featuring a fluent ElementBuilder API, CSS-like animations, event bubbling, and persistent layout caching."
+---
+
+Prowl.Paper is an open-source, MIT-licensed immediate-mode UI library built for the Prowl Game Engine ecosystem. Every frame you declare the entire UI tree from scratch using fluent builder calls — there are no retained widget objects to manage, no diffing pass, and no synchronization between a UI model and the renderer. Paper recomputes layout and style each frame and discards the tree at the end of it. Elements that must remember something across frames — a text cursor position, a scroll offset, an animation target — do so through explicit per-element storage keyed to a stable identity derived from call-site metadata, so the programming model stays functional even as state persists invisibly underneath. Paper renders through **Prowl.Quill**, a hardware-accelerated 2D vector canvas, and is portable to any host that can feed input events and provide a `ICanvasRenderer` backend. OpenTK and Raylib samples are included in the repository.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Paper
+```
+
+## The Paper Class — Setup
+
+The `Paper` class is the top-level object you hold for the lifetime of the window. Construct it with a renderer backend and an initial resolution, then call `BeginFrame`/`EndFrame` around your UI code each frame.
+
+```csharp
+// Construct once
+var paper = new Paper(yourRenderer, screenWidth, screenHeight, fontAtlasSettings);
+
+// Resize when the window changes
+paper.SetResolution(newWidth, newHeight);
+
+// Load fonts
+var fontSystem = new FontSystem();
+fontSystem.AddFont(File.ReadAllBytes("path/to/font.ttf"));
+var myFont = fontSystem.GetFont(24);
+```
+
+<ParamField path="yourRenderer" type="ICanvasRenderer" required>
+  A platform backend that implements `ICanvasRenderer`. Samples for OpenTK and Raylib are provided in the repository.
+</ParamField>
+<ParamField path="screenWidth / screenHeight" type="float" required>
+  Initial viewport dimensions in physical pixels.
+</ParamField>
+<ParamField path="fontAtlasSettings" type="FontAtlasSettings">
+  Optional atlas configuration (texture size, padding). Defaults work for most applications.
+</ParamField>
+
+Each frame, bracket all UI code with:
+
+```csharp
+paper.BeginFrame(deltaTime, dpiScale);  // dpiScale defaults to 1.0
+// ... all Paper.Box / Row / Column calls here ...
+paper.EndFrame();
+```
+
+`BeginFrame` resets the element tree and advances animation state. `EndFrame` runs layout, renders all layers to the Quill canvas, and uploads to the GPU.
+
+---
+
+## Building UI — ElementBuilder
+
+`Paper.Box`, `Paper.Row`, and `Paper.Column` are the three primitives for creating elements. They all return an `ElementBuilder` — a fluent configuration handle. `Row` and `Column` are just `Box` with a preset `LayoutType`.
+
+```csharp
+ElementBuilder Box(string stringID, int intID = 0, [CallerLineNumber] int lineID = 0)
+ElementBuilder Row(string stringID, int intID = 0, [CallerLineNumber] int lineID = 0)
+ElementBuilder Column(string stringID, int intID = 0, [CallerLineNumber] int lineID = 0)
+```
+
+To give an element children, call `.Enter()` and wrap it in a `using` statement. The `using` block ending pops the element from the parent stack. Elements declared without `using` are leaves parented under whatever `CurrentParent` is at that point.
+
+```csharp
+using (Paper.Column("MainContainer")
+    .BackgroundColor(30, 30, 40)
+    .Enter())
+{
+    using (Paper.Row("Header").Height(60).BackgroundColor(50, 80, 180).Enter())
+    {
+        Paper.Box("Title")
+            .Text(Text.Center("My App", myFont, Color.White));
+    }
+
+    using (Paper.Row("Body").Enter())
+    {
+        Paper.Box("Sidebar").Width(200).BackgroundColor(45, 45, 55);
+        Paper.Box("Content");   // stretches to fill remaining space
+    }
+}
+```
+
+<Note>
+When iterating a loop, pass the loop index as `intID` to avoid identity collisions: `Paper.Box("Item", i)`. Two elements that produce the same computed hash within one frame throw an exception.
+</Note>
+
+---
+
+## Layout
+
+Paper's layout system is cache-aware — identical geometry declared on successive frames costs nothing to recompute. Changing only paint properties (colors, borders) does not invalidate layout.
+
+### Sizing
+
+<Tabs>
+  <Tab title="Width & Height">
+    ```csharp
+    .Width(200)                         // fixed pixels
+    .Height(UnitValue.Percent(50))      // 50% of parent
+    .Width(UnitValue.Stretch())         // fill remaining space
+    .Height(UnitValue.Auto)             // size to content
+    ```
+  </Tab>
+  <Tab title="Min / Max">
+    ```csharp
+    .MinWidth(100).MaxWidth(400)
+    .MinHeight(40)
+    ```
+  </Tab>
+  <Tab title="Size shorthand">
+    ```csharp
+    .Size(100)           // width = height = 100px
+    .Size(200, 80)       // width=200, height=80
+    ```
+  </Tab>
+</Tabs>
+
+`UnitValue` has four modes:
+
+| Factory | Meaning |
+|---|---|
+| `UnitValue.Pixels(n)` | Fixed pixel size |
+| `UnitValue.Percent(n)` | Percentage of parent content area |
+| `UnitValue.Stretch(factor)` | Weighted grow among siblings |
+| `UnitValue.Auto` | Intrinsic content size |
+
+### Spacing & Alignment
+
+```csharp
+.Padding(16)                  // all sides
+.Padding(16, 8)               // horizontal, vertical
+.Margin(8)
+.Gap(12)                      // space between children
+.LineGap(8)                   // space between wrapped lines
+
+.AlignItems(LayoutAlignment.Center)   // cross-axis alignment for children
+.AlignSelf(LayoutAlignment.End)       // override for this element specifically
+.JustifyContent(LayoutJustification.SpaceBetween)
+```
+
+### Position Types
+
+```csharp
+// Default — participates in parent's flow
+.PositionType(PositionType.InFlow)
+
+// Absolute — positioned relative to nearest ancestor
+.PositionType(PositionType.SelfDirected)
+.AnchorLeft(12).AnchorBottom(8).AnchorRight(12)
+.Height(32)
+```
+
+### Grid Layout
+
+```csharp
+using (Paper.Grid("cards").Columns(3).Gap(8).LineGap(12).Enter())
+{
+    for (int i = 0; i < items.Length; i++)
+        Paper.Box("card", i).Height(80);
+}
+```
+
+---
+
+## Appearance
+
+Visual styling is applied through additional methods on `ElementBuilder`. All style properties participate in the animation system — see Transitions below.
+
+```csharp
+Paper.Box("Panel")
+    .BackgroundColor(Color.FromArgb(255, 30, 30, 40))
+    .BorderColor(Color.FromArgb(80, 120, 200))
+    .BorderWidth(1)
+    .Rounded(12)
+    .BoxShadow(0, 4, 16, 0, Color.FromArgb(80, 0, 0, 0))
+    .Opacity(0.95f);
+```
+
+<ParamField path=".Rounded(radius)" type="float">
+  Corner radius in pixels. Animatable.
+</ParamField>
+<ParamField path=".BoxShadow(offsetX, offsetY, blur, spread, color)" type="">
+  Drop shadow. `BoxShadow.None` (all-zero) renders nothing. `BoxShadow.IsVisible` checks `Color.A > 0`.
+</ParamField>
+<ParamField path=".Opacity(value)" type="float 0–1">
+  Composites the entire element subtree at this opacity.
+</ParamField>
+
+---
+
+## Gradients
+
+Paper provides three gradient types you can apply as a background fill. All positional parameters are relative to the element's own rect.
+
+```csharp
+// Linear gradient along a vector
+.BackgroundLinearGradient(0, 0, 1, 1, Color.DodgerBlue, Color.MediumPurple)
+
+// Radial gradient from center outward
+.BackgroundRadialGradient(0.5f, 0.5f, 0f, 0.7f, Color.White, Color.Transparent)
+
+// Box (inner-glow style)
+.BackgroundBoxGradient(0.5f, 0.5f, 1f, 1f, 8f, 16f, Color.DodgerBlue, Color.Transparent)
+
+// Remove a gradient
+.ClearBackgroundGradient()
+```
+
+---
+
+## State Variants
+
+State variants let you declare alternate style values that only apply when an element is in a particular interaction state. They chain off `ElementBuilder` and require `.End()` to return to the parent builder.
+
+```csharp
+Paper.Box("Button")
+    .BackgroundColor(Color.ForestGreen)
+    .Hovered
+        .BackgroundColor(Color.LimeGreen)
+        .End()
+    .Active
+        .BackgroundColor(Color.DarkGreen)
+        .Scale(0.97f)
+        .End()
+    .If(isDisabled)
+        .Opacity(0.4f)
+        .End();
+```
+
+<Tip>
+Style variants are resolved in declaration order. A later `.If(condition)` takes priority over `.Hovered` if both are active and both set the same property.
+</Tip>
+
+Named reusable styles can be registered once and applied by name:
+
+```csharp
+Paper.RegisterStyleFamily("btn")
+    .Base(new StyleTemplate()
+        .Height(40).Rounded(8)
+        .Transition(GuiProp.BackgroundColor, 0.2f))
+    .Hovered(new StyleTemplate().BackgroundColor(Color.LimeGreen))
+    .Active(new StyleTemplate().Scale(0.95f))
+    .Register();
+
+// Apply later
+Paper.Box("Save").Style("btn").OnClick(_ => Save());
+```
+
+---
+
+## Animations & Transitions
+
+Paper's transition system ties smooth interpolation to any `GuiProp` style property. Declare the transition once on the element; Paper chases the declared value each frame.
+
+```csharp
+Paper.Box("AnimBtn")
+    .BackgroundColor(Color.SteelBlue)
+    .Hovered
+        .BackgroundColor(Color.DodgerBlue)
+        .Rounded(16)
+        .End()
+    .Transition(GuiProp.BackgroundColor, 0.25f, Easing.SineInOut)
+    .Transition(GuiProp.Rounded, 0.2f, Easing.EaseOut);
+```
+
+<Note>
+Color transitions in the style system interpolate in **HSV space**, avoiding the muddy gray mid-point that straight RGB lerps produce between saturated hues.
+</Note>
+
+### Easing Functions
+
+The `Easing` static class provides `static float F(float t)` functions covering all standard CSS easing families, plus extras:
+
+<Accordion title="Available Easing Functions">
+
+| Family | Members |
+|---|---|
+| Linear | `Linear` |
+| Quad | `EaseIn`, `EaseOut`, `EaseInOut` |
+| Cubic / Quart / Quint | `CubicIn/Out/InOut`, `QuartIn/Out/InOut`, `QuintIn/Out/InOut` |
+| Sine | `SineIn`, `SineOut`, `SineInOut` |
+| Expo | `ExpoIn`, `ExpoOut`, `ExpoInOut` |
+| Circ | `CircIn`, `CircOut`, `CircInOut` |
+| Back | `BackIn`, `BackOut`, `BackInOut` |
+| Elastic | `ElasticIn`, `ElasticOut`, `ElasticInOut` |
+| Bounce | `BounceIn`, `BounceOut`, `BounceInOut` |
+| Utility | `Step`, `SmoothStep`, `SmootherStep`, `Spring(t, dampingRatio, frequency)` |
+
+</Accordion>
+
+### Imperative Animations
+
+For animations driven by code-side values (cursor chasing, progress, live scroll), use the imperative animation helpers which return the current animated value each frame:
+
+```csharp
+// Animate a bool flag to a 0..1 float
+float t = Paper.AnimateBool(isOpen, duration: 0.3f, Easing.SineInOut);
+
+// Exponential-chase toward a moving target (frame-rate independent)
+float x = Paper.AnimateFloat(targetX, speed: 8f);
+
+// Spring physics — can overshoot
+float spring = Paper.AnimateSpring(target, frequency: 6f, damping: 0.7f);
+
+// Decaying shake offset on a trigger edge
+Float2 shake = Paper.Shake(wasHit, intensity: 4f, decay: 6f);
+
+// Stateless cosine pulse (breathing / blinking)
+float pulse = Paper.Pulse(period: 1.5f);
+```
+
+---
+
+## Events
+
+Events bubble upward through the element hierarchy — hovering a child triggers `OnHover` on every ancestor. Use `.StopEventPropagation()` to halt bubbling at a specific element.
+
+```csharp
+Paper.Box("Draggable")
+    .OnClick((rect) => HandleClick())
+    .OnHover((rect) => ShowTooltip())
+    .OnEnter((rect) => PlayHoverSound())
+    .OnLeave((rect) => HideTooltip())
+    .OnDragStart((rect) => BeginDrag())
+    .OnDragging((startPos, rect) => UpdateDragPos(startPos))
+    .OnDragEnd((startPos, totalDelta, rect) => CommitDrop())
+    .OnScroll((delta, rect) => Scroll(delta));
+```
+
+### Event Types
+
+<CardGroup cols={2}>
+  <Card title="ClickEvent" icon="mouse-pointer">
+    Carries `ClickPhase` (`Pressed` / `Released` / `Clicked`) and the element `Rect`. Base class: `ElementEvent`.
+  </Card>
+  <Card title="DragEvent" icon="arrows-up-down-left-right">
+    Carries `DragPhase` (`Start` / `Dragging` / `End`), start position, and total delta.
+  </Card>
+  <Card title="ScrollEvent" icon="scroll">
+    Carries scroll delta `Float2`. Extends `ElementEvent`.
+  </Card>
+  <Card title="KeyEvent / TextInputEvent" icon="keyboard">
+    `KeyEvent` carries `PaperKey` and modifier flags. `TextInputEvent` carries the typed string after normalization.
+  </Card>
+</CardGroup>
+
+---
+
+## Text & Images
+
+### Text
+
+```csharp
+Paper.Box("Label")
+    .Text(Text.Center("Hello World", myFont, Color.White));
+// Alignment variants: Text.Left, Text.Right, Text.Center, Text.TopLeft, etc.
+```
+
+For multi-style content, Paper supports plain Markdown and tagged rich text with inline animations:
+
+```csharp
+.Markdown(text, font, boldFont, italicFont, boldItalicFont, monoFont)
+
+.RichText("<b>Bold</b> and <wave>wavy</wave> and <color=#FF6B6B>red</color>",
+          font, boldFont, italicFont, boldItalicFont, monoFont)
+```
+
+Rich text tags include `<b>`, `<i>`, `<u>`, `<s>`, `<color=...>`, `<size=...>`, and animation tags `<shake>`, `<wave>`, `<rainbow>`, `<pulse>`, `<fade>`, `<typewriter>`.
+
+### Images
+
+```csharp
+Paper.Box("Thumbnail")
+    .Width(128).Height(128)
+    .Image(myTexture, ImageScaleMode.Fill);
+// Modes: Fill, Fit, Stretch, Tile
+```
+
+---
+
+## Text Input
+
+Use `TextField` for single-line editing and `TextArea` for multi-line:
+
+```csharp
+// Single-line
+Paper.TextField(currentValue, new TextInputSettings
+{
+    Font = myFont,
+    TextColor = Color.White,
+    Placeholder = "Type here…",
+    MaxLength = 128,
+    SelectAllOnFocus = true,
+}, newVal => currentValue = newVal);
+
+// Password field
+Paper.TextField(password, new TextInputSettings
+{
+    Font = myFont,
+    MaskChar = '●',
+}, newVal => password = newVal);
+```
+
+`TextInputSettings` supports `CharFilter`, `ReadOnly`, `MaskChar`, `ForceValue` (programmatic override), and `ForceSelectAll`.
+
+<Warning>
+While a field is focused, the `value` parameter you pass in is ignored in favour of internal cursor/selection state. Use `ForceValue` to push an external change onto a focused field.
+</Warning>
+
+---
+
+## Input Forwarding
+
+Paper never polls the OS directly — the host forwards events each frame before calling `BeginFrame`.
+
+```csharp
+// Mouse position
+Paper.SetPointerPosition(mouseX, mouseY);
+
+// Button press / release
+Paper.SetPointerState(PaperMouseBtn.Left, mouseX, mouseY, isDown: true, isPointerMove: false);
+
+// Scroll wheel
+Paper.SetPointerWheel(wheelDelta);
+
+// Keyboard
+Paper.SetKeyState(PaperKey.Enter, isDown: true);
+
+// Text input (one or more characters per event)
+Paper.AddInputCharacter(typedString);
+
+// Clipboard (copy/paste support)
+Paper.SetClipboardHandler(myClipboardHandler);  // implements IClipboardHandler
+
+// Reset all input (e.g. on focus loss)
+Paper.ClearInput();
+```
+
+`PaperMouseBtn` values: `Left`, `Right`, `Middle`. `PaperKey` covers the full keyboard including modifier keys, arrow keys, Home/End, function keys, and more.
+
+---
+
+## Element Storage
+
+Per-element persistent state survives across frames and is keyed to the element's stable identity. Use it to build stateful custom widgets without external state variables.
+
+```csharp
+// Read state (returns default(T) if not yet set)
+var scrollOffset = Paper.GetElementStorage<float>();
+
+// Write state
+Paper.SetElementStorage(scrollOffset + delta);
+```
+
+These are called inside an element's scope (after its `ElementBuilder` chain is entered). The storage slot is automatically reclaimed when the element stops being declared.
+
+---
+
+## Dev Tools
+
+Paper ships a built-in browser-style inspector overlay. Enable it once and press **F12** to open the panel:
+
+```csharp
+paper.DevTools.Enabled = true;
+paper.DevTools.Font = myFont;   // optional — falls back to first system font
+
+// Log to the Console tab
+paper.Log("Rendered frame", PaperDevTools.LogLevel.Info);
+paper.Log("Layout overflow detected", PaperDevTools.LogLevel.Warning);
+paper.Log("Null renderer!", PaperDevTools.LogLevel.Error);
+```
+
+With `Enabled = false` (the default) there is zero per-frame cost. The overlay has six tabs:
+
+<Accordion title="DevTools Panels">
+
+| Tab | Contents |
+|---|---|
+| **Console** | Ring-buffered `Log(...)` output (500 entries, consecutive duplicates coalesced). |
+| **Elements** | Live element tree: id, parent, depth, position, size, layer, tab-index, layout type, text, event handlers. Includes a "Pick" mode — hover to highlight any element on screen, click to select it. |
+| **Profiler** | Per-phase `EndFrame` timings (Styles / Layout / PostLayout / Culling / Layered / Interaction / Render / Upload) plus a frame-time history. |
+| **Render** | Draw-call, vertex, and triangle counts per frame. |
+| **Input** | Current pointer position, pressed keys, and button states. |
+| **Atlas** | Live view of the font atlas texture. |
+
+</Accordion>
+
+---
+
+## Window Manager
+
+`WindowManager` is a helper class for drag-resizable floating windows backed by Paper elements. It tracks window state (position, size, z-order) across frames using per-element storage.
+
+```csharp
+var windowManager = new WindowManager(paper);
+
+// In your frame loop:
+windowManager.Begin("MyWindow", "Inspector", ref x, ref y, ref w, ref h);
+{
+    // Draw window content here
+}
+windowManager.End();
+```
+
+---
+
+## Complete Example — Hover Button
+
+The following self-contained example builds a centered button that animates its background color and scale on hover and press, logs a message on click, and is wired to a minimal input loop.
+
+```csharp
+using Prowl.PaperUI;
+using Prowl.PaperUI.LayoutEngine;
+
+// --- one-time setup ---
+var paper = new Paper(myRenderer, 800, 600);
+Paper.SetResolution(800, 600);
+
+var fontSystem = new FontSystem();
+fontSystem.AddFont(File.ReadAllBytes("Roboto-Regular.ttf"));
+var font = fontSystem.GetFont(16);
+
+// --- per-frame render function ---
+void RenderUI(float deltaTime)
+{
+    // Forward host input
+    Paper.SetPointerPosition(Input.MouseX, Input.MouseY);
+    if (Input.LeftMousePressed)
+        Paper.SetPointerState(PaperMouseBtn.Left, Input.MouseX, Input.MouseY, true, false);
+    if (Input.LeftMouseReleased)
+        Paper.SetPointerState(PaperMouseBtn.Left, Input.MouseX, Input.MouseY, false, false);
+
+    Paper.BeginFrame(deltaTime);
+
+    // Full-screen container — centers the button
+    using (Paper.Column("Root")
+        .Width(UnitValue.Stretch())
+        .Height(UnitValue.Stretch())
+        .AlignItems(LayoutAlignment.Center)
+        .JustifyContent(LayoutJustification.Center)
+        .BackgroundColor(20, 20, 30)
+        .Enter())
+    {
+        Paper.Box("HoverButton")
+            .Width(160).Height(48)
+            // Base appearance
+            .BackgroundColor(Color.FromArgb(255, 60, 100, 200))
+            .Rounded(10)
+            .BoxShadow(0, 4, 12, 0, Color.FromArgb(80, 0, 0, 0))
+            // Hover state
+            .Hovered
+                .BackgroundColor(Color.FromArgb(255, 80, 130, 240))
+                .Rounded(14)
+                .End()
+            // Active (pressed) state
+            .Active
+                .BackgroundColor(Color.FromArgb(255, 40, 70, 160))
+                .Scale(0.95f)
+                .End()
+            // Smooth transitions
+            .Transition(GuiProp.BackgroundColor, 0.18f, Easing.SineInOut)
+            .Transition(GuiProp.Rounded, 0.15f, Easing.EaseOut)
+            .Transition(GuiProp.Scale, 0.12f, Easing.EaseOut)
+            // Label
+            .Text(Text.Center("Click Me", font, Color.White))
+            // Event handler
+            .OnClick(_ => Console.WriteLine("Button clicked!"));
+    }
+
+    Paper.EndFrame();
+}
+```

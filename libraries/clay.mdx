@@ -1,0 +1,278 @@
+---
+title: "Prowl.Clay: Pure-C# 3D Model Importer for glTF, FBX, and OBJ"
+sidebarTitle: "Clay"
+description: "Prowl.Clay imports glTF 2.0/GLB/VRM, Wavefront OBJ, and Autodesk FBX into a read-only Model scene graph with a configurable post-process pipeline."
+---
+
+Prowl.Clay is a pure-C# model importer that converts glTF 2.0, GLB, VRM, Wavefront OBJ, and Autodesk FBX (binary and ASCII, versions 7100–7700) into a fully-baked, read-only `Model` scene graph. It has no native dependencies and is AOT-friendly, using [Prowl.Vector](https://github.com/ProwlEngine/Prowl.Vector) for all math. A configurable post-process pipeline handles coordinate conversion, normal generation, tangent space computation (MikkTSpace), cache-locality optimization (Tipsify), skeleton population, and more — all toggleable per-import via bit flags.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Clay
+```
+
+## Loading a Model
+
+The single entry point is `ModelImporter.Load`. Pass a file path and an optional `ModelImporterSettings`; Clay detects the format from the extension and, if that fails, from the file's magic bytes. You can also load from an arbitrary `Stream` by supplying a format hint string.
+
+```csharp
+using Prowl.Clay;
+using Prowl.Clay.Importer;
+
+// Load from a file path — format auto-detected
+Model model = ModelImporter.Load("character.glb");
+
+Console.WriteLine($"{model.Nodes.Count} nodes, {model.Meshes.Count} meshes");
+foreach (var mesh in model.Meshes)
+    Console.WriteLine($"  {mesh.Name}: {mesh.VertexCount} verts, {mesh.SubMeshes.Length} submeshes");
+
+// Load from a stream with an explicit format hint
+using var stream = File.OpenRead("scene.fbx");
+Model streamed = ModelImporter.Load(stream, formatHint: "fbx", ModelImporterSettings.GameFast);
+```
+
+## ModelImporterSettings
+
+`ModelImporterSettings` is a C# `record`, so you can start from a built-in preset and use `with`-expressions to override individual fields.
+
+```csharp
+var settings = ModelImporterSettings.GameQuality with
+{
+    BoneWeightLimit       = 4,
+    SmoothNormalsAngleDeg = 60f,
+    GlobalScale           = 0.01f,           // convert centimetres to metres
+    OnLog                 = entry => Console.WriteLine(entry),
+};
+
+Model model = ModelImporter.Load("scene.gltf", settings);
+```
+
+The four built-in presets cover the most common workflows:
+
+| Preset | `PostProcessFlags` applied | Typical use |
+|---|---|---|
+| `Raw` | None | Debugging, structural inspection |
+| `GameFast` | Minimal — triangulate + join verts + coordinate convert | Fast preview builds |
+| `GameQuality` | All standard steps including tangents, bounds, bone limits | Runtime game assets |
+| `EditorMaxQuality` | All steps + validators + graph/mesh optimizers | Editor asset import |
+
+Additional settings properties: `BoneWeightLimit` (default 4), `SmoothNormalsAngleDeg` (default 80°), `GlobalScale` (default 1.0), `RecalculateNormals`, `MaxVerticesPerMesh` (default 65534), `StrictValidation`, `SceneIndex`, `OptimizeGraphPreserveNodeNames`, and the `OnLog` callback.
+
+## PostProcessFlags
+
+Each step is an independent bit in the `PostProcessFlags` enum. Steps always execute in canonical order regardless of the order bits are set.
+
+| Flag | Description |
+|---|---|
+| `Triangulate` | Convert polygons and strip/fan topologies to a pure triangle list |
+| `JoinIdenticalVertices` | Collapse identical attribute tuples into shared vertex indices |
+| `GenerateNormals` | Generate flat per-face normals when the source provides none |
+| `GenerateSmoothNormals` | Generate angle-weighted smooth normals, splitting at hard edges |
+| `CalcTangentSpace` | Compute tangents and bitangent signs using MikkTSpace |
+| `LimitBoneWeights` | Cap bone influences per vertex and renormalize weights |
+| `RemoveDegenerates` | Strip zero-area triangles and coincident-index faces |
+| `FindInvalidData` | Detect NaN/Inf values and redundant animation keys |
+| `FlipUVs` | Flip the V axis on every UV channel |
+| `FlipWindingOrder` | Reverse triangle winding order |
+| `ConvertCoordinateSystem` | Convert to left-handed, Y-up, +Z-forward (DirectX convention) |
+| `GlobalScale` | Apply `ModelImporterSettings.GlobalScale` to all positions |
+| `EmbedTextures` | Read external textures into `Texture.EncodedBytes` |
+| `PopulateSkeletons` | Build `Skin` objects with bone-node links and bind poses |
+| `OptimizeMeshes` | Merge sibling meshes sharing material and without skinning |
+| `OptimizeGraph` | Collapse identity-transform nodes that have no semantic role |
+| `ImproveCacheLocality` | Reorder triangle indices for vertex-cache efficiency (Tipsify) |
+| `SplitLargeMeshes` | Split meshes exceeding `MaxVerticesPerMesh` |
+| `Debone` | Strip dummy bone weights with no animation effect |
+| `SortByPrimitiveType` | Split meshes mixing triangle/line/point primitives |
+| `ValidateDataStructure` | Structural sanity checks; `StrictValidation` promotes warnings to exceptions |
+
+## Model Scene Graph
+
+The `Model` returned by `ModelImporter.Load` is the root of a read-only scene graph.
+
+```csharp
+// Top-level collections
+IReadOnlyList<ModelNode>      model.Nodes
+IReadOnlyList<Mesh>           model.Meshes
+IReadOnlyList<Material>       model.Materials
+IReadOnlyList<AnimationClip>  model.AnimationClips
+IReadOnlyList<Camera>         model.Cameras
+IReadOnlyList<Light>          model.Lights
+ImportLog                     model.Log
+```
+
+Each `ModelNode` carries a name, local transform (position, rotation, scale), `MeshIndex` (−1 if the node has no mesh), `SkinIndex` (−1 if unskinned), and typed parent/child links for walking the hierarchy.
+
+```csharp
+foreach (var node in model.Nodes)
+{
+    if (node.MeshIndex >= 0)
+    {
+        Mesh mesh = model.Meshes[node.MeshIndex];
+        // Upload mesh.SubMeshes to GPU...
+    }
+}
+```
+
+## Mesh Data
+
+The `Mesh` class holds all per-vertex data as flat arrays that are ready to upload to a GPU buffer.
+
+```csharp
+// Access vertex data on a game-quality loaded mesh
+var settings = ModelImporterSettings.GameQuality;
+Model model = ModelImporter.Load("hero.glb", settings);
+Mesh mesh = model.Meshes[0];
+
+Console.WriteLine($"Verts: {mesh.VertexCount}");
+
+// Flat arrays — null when the source/post-process didn't produce them
+float[]? positions = mesh.Positions;   // XYZ interleaved
+float[]? normals   = mesh.Normals;     // XYZ interleaved
+float[]? tangents  = mesh.Tangents;    // XYZW interleaved (W = bitangent sign)
+float[]? uv0       = mesh.UV0;         // UV interleaved
+float[]? colors    = mesh.Colors;      // RGBA interleaved
+
+// Bone weights (4 influences per vertex after LimitBoneWeights)
+BoneWeight[]? weights = mesh.BoneWeights;
+
+// Sub-meshes partition index data by material
+foreach (var sub in mesh.SubMeshes)
+{
+    int matIndex = sub.MaterialIndex;
+    int[] indices = sub.Indices;
+    PrimitiveTopology topo = sub.Topology; // Triangles, Lines, Points, ...
+}
+
+// Axis-aligned bounds (populated by GenerateBounds)
+Bounds b = mesh.Bounds;
+```
+
+`PrimitiveTopology` values include `Triangles`, `TriangleStrip`, `Lines`, `LineStrip`, and `Points`. The `Bounds` struct exposes `Min`, `Max`, and `Center`/`Extents` helpers.
+
+## Materials
+
+`Material` exposes a full PBR surface description sourced from glTF, FBX, or OBJ material data.
+
+```csharp
+Material mat = model.Materials[0];
+
+// PBR base
+float[] baseColor   = mat.BaseColorFactor;        // RGBA [0-1]
+float   metallic    = mat.MetallicFactor;
+float   roughness   = mat.RoughnessFactor;
+float[] emissive    = mat.EmissiveFactor;          // RGB
+
+// Texture slots — null when absent
+mat.BaseColorTexture
+mat.MetallicRoughnessTexture
+mat.NormalTexture
+mat.OcclusionTexture
+mat.EmissiveTexture
+
+// Alpha handling
+MaterialAlphaMode mode = mat.AlphaMode;  // Opaque | Mask | Blend
+float             cutoff = mat.AlphaCutoff;
+
+// Sampler on each texture
+TextureWrapMode  wrap   = mat.BaseColorTexture!.Sampler.WrapS;
+TextureFilterMode filter = mat.BaseColorTexture!.Sampler.MinFilter;
+```
+
+`MaterialAlphaMode` has values `Opaque`, `Mask`, and `Blend`. `TextureWrapMode` includes `Repeat`, `ClampToEdge`, and `MirroredRepeat`. `TextureFilterMode` covers `Nearest`, `Linear`, and mipmap variants.
+
+## Animation
+
+Each `AnimationClip` holds a flat array of `AnimationBinding` entries that describe which node property a curve drives.
+
+```csharp
+foreach (AnimationClip clip in model.AnimationClips)
+{
+    Console.WriteLine($"Clip: {clip.Name}  ({clip.Duration:F2}s)");
+
+    foreach (AnimationBinding binding in clip.Bindings)
+    {
+        int node = binding.NodeIndex;
+
+        switch (binding.Property)
+        {
+            case AnimatedProperty.Position:
+            case AnimatedProperty.Rotation:
+            case AnimatedProperty.Scale:
+            case AnimatedProperty.BlendShapeWeight:
+                // binding.Curve contains the keyframe data
+                break;
+        }
+    }
+}
+```
+
+`AnimatedProperty` values: `Position`, `Rotation`, `Scale`, `BlendShapeWeight`. Morph-target animation uses `BlendShapeWeight` bindings alongside the `BlendShape` objects on the mesh.
+
+## Cameras & Lights
+
+```csharp
+foreach (var cam in model.Cameras)
+{
+    if (cam.Projection == CameraProjection.Perspective)
+        Console.WriteLine($"FOV: {cam.YFovDegrees}°  Near: {cam.ZNear}  Far: {cam.ZFar}");
+    else
+        Console.WriteLine($"Ortho: {cam.XMag}×{cam.YMag}");
+}
+
+foreach (var light in model.Lights)
+{
+    switch (light.Type)
+    {
+        case LightType.Directional: break;
+        case LightType.Point:       break;
+        case LightType.Spot:        break;
+    }
+}
+```
+
+`CameraProjection` values: `Perspective`, `Orthographic`. `LightType` values: `Directional`, `Point`, `Spot`.
+
+## Custom File Resolver
+
+Implement `IFileResolver` to plug a custom asset store (e.g. a virtual file system or content package) into the import pipeline. Clay calls `OpenRead(path)` whenever it needs an external resource such as a `.bin` buffer or a texture referenced by a `.gltf` file.
+
+```csharp
+public class VfsResolver : IFileResolver
+{
+    public Stream OpenRead(string path)
+    {
+        // Return a Stream for the given path from your own storage
+        return MyVfs.Open(path);
+    }
+}
+
+Model model = ModelImporter.Load(
+    stream, formatHint: "gltf",
+    settings: ModelImporterSettings.GameQuality,
+    resolver: new VfsResolver());
+```
+
+## Error Handling
+
+Hard import failures throw `Prowl.Clay.ImportException`. Recoverable issues — unsupported material extensions, missing optional data, codec fallbacks — are collected in `Model.Log` as `ImportLogEntry` values.
+
+```csharp
+try
+{
+    Model model = ModelImporter.Load("scene.fbx");
+
+    foreach (var entry in model.Log.Entries)
+    {
+        if (entry.Severity == ImportLogSeverity.Warning)
+            Console.WriteLine($"[WARN] {entry.Message}");
+    }
+}
+catch (ImportException ex)
+{
+    Console.WriteLine($"Import failed: {ex.Message}");
+}
+```
+
+`ImportLogSeverity` values: `Info`, `Warning`, `Error`. The `OnLog` callback on `ModelImporterSettings` fires for each entry as it is emitted, so you can stream warnings to a live editor log without waiting for the import to complete.

@@ -1,0 +1,541 @@
+---
+title: "Prowl.Vector: 32/64-bit Math Library for .NET Game Dev"
+sidebarTitle: "Vector"
+description: "Prowl.Vector provides Unity-inspired vector, matrix, and quaternion math with noise, BVH, CSG geometry operations, and collision detection for .NET."
+---
+
+`Prowl.Vector` is the foundational math library of the Prowl Anthology — a comprehensive, self-contained package covering every numerical primitive a 3D game or simulation can need. Built for both 32-bit and 64-bit workloads, it supplies twelve vector types across three precisions, 4×4 and 3×3 matrices, a full-featured `Quaternion`, an extensive `Maths` utility class, procedural noise functions, half-edge mesh geometry with CSG operations, GJK/SAT collision detection, static and dynamic BVH acceleration structures, and a high-quality xoshiro256\*\* random number generator. The API is deliberately close to Unity's conventions so developers coming from that ecosystem will feel at home immediately, while the dual float/double precision design makes it equally useful for editor tools, physics simulations, and offline renderers that demand 64-bit accuracy.
+
+## Installation
+
+Add `Prowl.Vector` to any .NET project targeting net8.0, net9.0, net10.0, or netstandard2.1:
+
+<CodeGroup>
+```bash dotnet CLI
+dotnet add package Prowl.Vector
+```
+
+```xml PackageReference
+<PackageReference Include="Prowl.Vector" Version="3.4.0" />
+```
+</CodeGroup>
+
+<Note>
+`Prowl.Vector` has no runtime dependencies beyond the BCL. On `netstandard2.1` a PolySharp shim is pulled in automatically at build time for language-feature back-fills; it produces no runtime binaries.
+</Note>
+
+---
+
+## Vector Types
+
+Prowl.Vector ships twelve concrete vector structs grouped into three precision families. Every type is value-typed, implements `IEquatable<T>` and `IFormattable`, carries the usual `Zero`, `One`, and `UnitX/Y/Z/W` static properties, and overloads all arithmetic operators so math reads like algebra.
+
+<CardGroup cols={3}>
+  <Card title="Float family" icon="f">
+    `Float2`, `Float3`, `Float4` — single-precision (`float`)
+  </Card>
+  <Card title="Double family" icon="d">
+    `Double2`, `Double3`, `Double4` — double-precision (`double`)
+  </Card>
+  <Card title="Int family" icon="i">
+    `Int2`, `Int3`, `Int4` — 32-bit integer components
+  </Card>
+</CardGroup>
+
+Implicit widening conversions let you move freely between sizes within a family (`Int2` → `Int3`, `Int3` → `Int4`). Explicit casts handle cross-precision conversion (`Float3` ↔ `Double3`).
+
+```csharp
+// Construction
+var position = new Double3(1.0, 2.0, 3.0);
+var texcoord = new Float2(0.5f, 0.25f);
+var tileOffset = new Int2(3, 7);
+
+// Arithmetic — all operator overloads are defined
+Double3 shifted = position + new Double3(0, 1, 0);
+Double3 scaled  = position * 2.0;
+Float3  normal  = Float3.Normalize(new Float3(1f, 1f, 0f));
+
+// Common operations
+double dot      = Double3.Dot(position, Double3.UnitY);
+Double3 cross   = Double3.Cross(position, Double3.UnitZ);
+double dist     = Double3.Distance(position, Double3.Zero);
+Double3 halfway = Double3.Lerp(position, Double3.Zero, 0.5);
+
+// Spherical interpolation along the unit sphere
+Double3 slerped = Double3.Slerp(Double3.UnitX, Double3.UnitZ, 0.5);
+```
+
+---
+
+## Matrices
+
+`Float4x4` and `Double4x4` are row-major 4×4 matrices with a complete set of factory methods covering translation, rotation, scale, view, and projection. `Float3x3` / `Double3x3` and `Float2x2` / `Double2x2` cover the smaller cases.
+
+```csharp
+// Individual transform matrices
+var translation = Double4x4.CreateTranslation(new Double3(10, 0, 5));
+var rotationY   = Double4x4.RotateY(Maths.PI * 0.5);
+var uniformScale = Double4x4.CreateScale(2.0);
+
+// Combined TRS in one call
+var transform = Double4x4.CreateTRS(
+    new Double3(10, 0, 5),
+    Quaternion.FromEuler(new Double3(0, 45, 0)),
+    new Double3(1, 1, 1)
+);
+
+// View and projection
+var view = Double4x4.CreateLookAt(
+    eye:    new Double3(0, 5, -10),
+    target: Double3.Zero,
+    up:     Double3.UnitY
+);
+double aspect = 16.0 / 9.0;
+var proj = Double4x4.CreatePerspectiveFov(Maths.PI / 4.0, aspect, 0.1, 1000.0);
+
+// Transforming geometry
+var worldPos    = Double4x4.TransformPoint(new Double3(1, 0, 0), transform);
+var worldNormal = Double4x4.TransformNormal(Double3.UnitY, transform);
+```
+
+<Tip>
+Use `Double4x4` for editor tools and offline pipelines where precision accumulation over many frames matters. Flip to `Float4x4` for hot GPU-upload paths where `float` is the native GPU type anyway.
+</Tip>
+
+---
+
+## Quaternion
+
+The single `Quaternion` type is stored as double-precision `(X, Y, Z, W)` and is designed around the patterns Unity developers already know. The `*` operator applies a rotation to a `Double3`.
+
+```csharp
+// Construction
+var euler    = Quaternion.FromEuler(new Double3(pitch: 30, yaw: 90, roll: 0));
+var axisAngle = Quaternion.AxisAngle(Double3.UnitY, Maths.PI / 4.0);
+var lookAt   = Quaternion.LookRotation(
+    forward: Double3.UnitZ,
+    upwards: Double3.UnitY
+);
+
+// Interpolation
+var halfway = Quaternion.Slerp(euler, axisAngle, 0.5);  // smooth
+var fast    = Quaternion.Nlerp(euler, axisAngle, 0.5);  // cheaper, unit-sphere approx
+
+// Apply rotation to a point
+Double3 rotated = axisAngle * new Double3(1, 0, 0);
+
+// Decompose back to Euler
+Double3 angles = euler.EulerAngles;
+
+// Convert to/from matrix
+var   mat  = Double4x4.CreateFromQuaternion(euler);
+var   back = Quaternion.FromMatrix(mat);
+```
+
+---
+
+## Math Utilities
+
+`Maths` is a large static partial class that acts as a single import for every scalar and vector math helper you need. It aggregates constants, trigonometry, interpolation, and range utilities across `float`, `double`, and all vector types.
+
+### Constants
+
+```csharp
+float pi       = Maths.PI;           // 3.14159…
+float tau      = Maths.Tau;          // 6.28318… (2π)
+float e        = Maths.E;            // 2.71828…
+float phi      = Maths.GoldenRatio;  // 1.61803…
+float sqrt2    = Maths.Sqrt2;
+float g        = Maths.StandardGravity;    // 9.80665 m/s²
+float c        = Maths.SpeedOfLight;       // 299 792 458 m/s
+float deg2rad  = Maths.Deg2Rad;
+float rad2deg  = Maths.Rad2Deg;
+```
+
+### Interpolation and Range
+
+```csharp
+// Clamp
+float health = Maths.Clamp(rawValue, 0f, 100f);
+
+// Lerp (clamped t)
+float blended = Maths.Lerp(0f, 100f, 0.75f);          // 75.0
+
+// InverseLerp — find t given a value
+float t = Maths.InverseLerp(0f, 100f, 75f);           // 0.75
+
+// Remap — map a value from one range to another
+float mapped = Maths.Remap(0.5f, 0f, 1f, -100f, 100f); // 0.0
+
+// Smoothstep
+float smooth = Maths.Smoothstep(0f, 1f, 0.5f);
+
+// Angle conversions
+float radians = Maths.ToRadians(90f);                  // 1.5707…
+float degrees = Maths.ToDegrees(Maths.PI);             // 180.0
+```
+
+---
+
+## Colors
+
+`Color` stores an RGBA color as four `float` components in the `[0, 1]` range and exposes the full CSS/X11 named-color palette as static properties. `Color32` stores the same information in four `byte` fields and provides implicit conversions in both directions.
+
+```csharp
+// Named colors
+Color sky  = Color.CornflowerBlue;
+Color fire = Color.OrangeRed;
+
+// Manual construction
+var tint = new Color(r: 1f, g: 0.5f, b: 0f, a: 1f);
+
+// Byte precision (GPU upload, serialisation)
+Color32 packed = tint;          // implicit Color → Color32
+Color   back   = packed;        // implicit Color32 → Color
+
+// From System.Drawing.Color
+Color32 sysColor = System.Drawing.Color.Aquamarine;
+
+// Channel access
+float brightness = (tint.R + tint.G + tint.B) / 3f;
+```
+
+---
+
+## Animation Curves
+
+`AnimationCurve` is a sorted, multi-dimensional spline sampled at arbitrary time values. Each `Keyframe` carries a time, value(s), and optional in/out tangents, plus a `CurveInterpolation` flag (`Linear`, `CubicSpline`, `Step`). The curve supports 1–4 component values and can evaluate to `float`, `Float2`, `Float3`, `Float4`, or `Quaternion`.
+
+```csharp
+// Build a simple ease-in/out opacity curve over 2 seconds
+var curve = AnimationCurve.EaseInOut(
+    startTime: 0f, startValue: 0f,
+    endTime:   2f, endValue:   1f
+);
+
+// Sample at any time
+float opacity = curve.Evaluate(1.0f);   // ~0.5 (eased midpoint)
+
+// Add a hold keyframe using Step interpolation
+curve.AddKey(new Keyframe(3f, 1f) { Interpolation = CurveInterpolation.Step });
+
+// Multi-component position curve (3D)
+var posCurve = new AnimationCurve(dimension: 3);
+posCurve.AddKey(0f, new Float3(0, 0, 0));
+posCurve.AddKey(1f, new Float3(10, 5, 0));
+posCurve.AddKey(2f, new Float3(20, 0, 0));
+
+Float3 worldPos = posCurve.EvaluateFloat3(0.5f);
+
+// Rotation curve — evaluates with Slerp between keys
+var rotCurve = new AnimationCurve(dimension: 4);
+rotCurve.AddKey(0f,  new Float4(0, 0, 0, 1));
+rotCurve.AddKey(1f,  new Float4(0, 0.7071f, 0, 0.7071f));
+Quaternion rot = rotCurve.EvaluateQuaternion(0.5f);
+```
+
+<Note>
+Factory helpers like `AnimationCurve.Constant(value)`, `AnimationCurve.Linear(...)`, and `AnimationCurve.FromPacked(...)` cover the most common construction patterns without building keyframes manually.
+</Note>
+
+---
+
+## Procedural Noise
+
+The static `Noise` class provides GPU-style noise functions ported to CPU C#. All overloads are pure functions with no allocation.
+
+<Tabs>
+  <Tab title="Simplex (SNoise)">
+    ```csharp
+    // 2D, 3D, and 4D simplex noise
+    float n2 = Noise.SNoise(new Float2(x, y));
+    float n3 = Noise.SNoise(new Float3(x, y, z));
+    float n4 = Noise.SNoise(new Float4(x, y, z, w));
+
+    // 3D simplex with analytical gradient (useful for normal-map generation)
+    float n3g = Noise.SNoise(new Float3(x, y, z), out Float3 gradient);
+    ```
+  </Tab>
+  <Tab title="Classic Perlin (CNoise)">
+    ```csharp
+    // Classic Perlin — smooth, no directional bias
+    float perlin2 = Noise.CNoise(new Float2(x, y));
+    float perlin3 = Noise.CNoise(new Float3(x, y, z));
+    float perlin4 = Noise.CNoise(new Float4(x, y, z, w));
+    ```
+  </Tab>
+  <Tab title="Periodic Perlin (PNoise)">
+    ```csharp
+    // Tileable Perlin — rep defines the tile period in each dimension
+    float tiled2 = Noise.PNoise(new Float2(x, y), new Float2(tileX, tileY));
+    float tiled3 = Noise.PNoise(new Float3(x, y, z), new Float3(tx, ty, tz));
+    ```
+  </Tab>
+  <Tab title="Cellular / Worley">
+    ```csharp
+    // Cellular2D returns (F1, F2): distances to nearest two cell centres
+    Float2 worley2d = Noise.Cellular2D(new Float2(x, y));
+    float  f1       = worley2d.X;
+    float  f2       = worley2d.Y;
+
+    // 3D variant
+    Float2 worley3d = Noise.Cellular3D(new Float3(x, y, z));
+
+    // Optimised 2×2 and 2×2×2 variants for tighter loops
+    Float2 fast2 = Noise.Cellular2x2(new Float2(x, y));
+    Float2 fast3 = Noise.Cellular2x2x2(new Float3(x, y, z));
+    ```
+  </Tab>
+</Tabs>
+
+**2D terrain heightmap example:**
+
+```csharp
+int width = 256, height = 256;
+float[] heightmap = new float[width * height];
+
+for (int py = 0; py < height; py++)
+for (int px = 0; px < width;  px++)
+{
+    float scale = 0.04f;
+    float sample = 0f;
+    float amplitude = 1f, frequency = 1f;
+
+    for (int octave = 0; octave < 5; octave++)
+    {
+        sample    += Noise.SNoise(new Float2(px * scale * frequency,
+                                             py * scale * frequency)) * amplitude;
+        amplitude *= 0.5f;
+        frequency *= 2f;
+    }
+
+    heightmap[py * width + px] = sample;
+}
+```
+
+---
+
+## Geometry & Collision
+
+The `Prowl.Vector.Geometry` namespace contains bounding-volume types, a general collision interface, and a rich static `Intersection` helper.
+
+### Bounding Volumes
+
+Every geometry type implements `IBoundingShape`, which is the single interface required by the GJK solver.
+
+<CardGroup cols={3}>
+  <Card title="AABB" icon="cube">
+    Axis-aligned bounding box with `Min`/`Max`. Factory methods: `FromCenterAndSize`, `FromPoints`, `FromAABBs`, `FromSphere`.
+  </Card>
+  <Card title="Sphere" icon="circle">
+    Centre + radius. `IBoundingShape` support gives it free GJK.
+  </Card>
+  <Card title="Frustum" icon="eye">
+    Six-plane view frustum. `FromMatrix`, `FromMatrices`, `FromCamera`, `CreateOrthographic`.
+  </Card>
+  <Card title="Ray" icon="arrow-right">
+    Origin + Direction; used for raycasts across all volume types.
+  </Card>
+  <Card title="Plane" icon="layer-group">
+    Normal + distance; also used internally by Frustum and CSG.
+  </Card>
+  <Card title="Triangle / Cone" icon="triangle">
+    `Triangle` for ray-mesh tests; `Cone` for spot-light volumes.
+  </Card>
+</CardGroup>
+
+### GJK Collision Detection
+
+```csharp
+var box    = new AABB(new Float3(-1, -1, -1), new Float3(1, 1, 1));
+var sphere = new Sphere(Float3.Zero, 1.5f);
+var cone   = new Cone(Float3.Zero, Float3.UnitY, height: 2f, baseRadius: 1f);
+
+// GJK works on any two IBoundingShape values
+bool boxSphereHit = GJK.Intersects(box, sphere);
+bool coneSphereHit = GJK.Intersects(cone, sphere);
+```
+
+### Intersection Static Class
+
+`Intersection` provides fast analytical tests when you know the exact types involved:
+
+```csharp
+var ray = new Ray(new Float3(0, 10, 0), -Float3.UnitY);
+
+// Ray vs AABB
+bool hitBox = Intersection.RayAABB(
+    ray.Origin, ray.Direction,
+    box.Min, box.Max, out double tBox);
+
+// Ray vs Triangle (Möller–Trumbore)
+bool hitTri = Intersection.RayTriangle(
+    ray.Origin, ray.Direction,
+    v0: new Float3(-1, 0, -1),
+    v1: new Float3( 1, 0, -1),
+    v2: new Float3( 0, 0,  1),
+    out double t, out double u, out double v);
+
+// Sphere vs Sphere overlap
+bool spheresOverlap = Intersection.SphereSphereOverlap(
+    centerA: Float3.Zero,    radiusA: 1f,
+    centerB: new Float3(1.5f, 0, 0), radiusB: 1f);
+
+// Closest-point queries
+Intersection.ClosestPointOnAABBToPoint(box.Min, box.Max,
+    new Float3(5, 0, 0), out Float3 closest);
+```
+
+---
+
+## Half-Edge Mesh (GeometryData)
+
+`GeometryData` is a half-edge mesh representation built for programmatic geometry construction and editing. It organises mesh data into `Vertex`, `Edge`, `Loop`, and `Face` classes with a flexible attribute system for per-vertex or per-face custom data.
+
+`GeometryOperators` provides a library of in-place mesh operations:
+
+```csharp
+// Build a box as GeometryData
+GeometryData mesh = GeometryGenerator.GenerateCube(1f);
+
+// Subdivide — Catmull–Clark style face subdivision
+GeometryOperators.Subdivide(mesh);
+
+// Extrude selected faces outward by 0.5 units
+var topFaces = mesh.Faces.Where(f => /* select top */ true);
+GeometryOperators.ExtrudeFaces(mesh, topFaces, distance: 0.5f,
+    ExtrudeMode.AlongNormals);
+
+// Bevel vertices to round corners
+GeometryOperators.BevelVertices(mesh, mesh.Vertices, offset: 0.1f);
+
+// Weld coincident vertices within a tolerance
+int welded = GeometryOperators.WeldVertices(mesh, threshold: 0.0001f);
+
+// Triangulate for GPU upload
+GeometryOperators.Triangulate(mesh);
+GeometryData.TriangleMesh triangles = mesh.ToTriangleMesh();
+```
+
+### CSG Operations
+
+`GeometryCSG` performs Constructive Solid Geometry on any two `GeometryData` meshes:
+
+```csharp
+GeometryData sphere = GeometryGenerator.GenerateSphere(1f, 32);
+GeometryData box    = GeometryGenerator.GenerateCube(1.5f);
+
+// Boolean operations
+GeometryData union    = GeometryCSG.Union(sphere, box);
+GeometryData subtract = GeometryCSG.Subtraction(sphere, box);  // sphere minus box
+GeometryData intersect = GeometryCSG.Intersect(sphere, box);
+```
+
+<Warning>
+CSG input meshes must be closed (watertight) manifolds. Use `CSGBrushValidity.IsValid(mesh)` to verify a mesh before performing operations; invalid brushes produce undefined output.
+</Warning>
+
+---
+
+## BVH Spatial Acceleration
+
+Two complementary BVH implementations cover the common use cases: a fast static tree for scene geometry that does not move, and an incremental dynamic tree for objects that are updated every frame.
+
+### Static `Bvh<T>`
+
+```csharp
+// Build once from a list of triangles with their AABBs
+var triangles = LoadSceneTriangles();  // IReadOnlyList<Triangle>
+var bvh = new Bvh<Triangle>(
+    triangles,
+    bounds: tri => AABB.FromPoints([tri.A, tri.B, tri.C]),
+    settings: new BvhBuildSettings
+    {
+        Quality     = BvhBuildQuality.High,
+        MaxLeafSize = 4,
+        SahBinCount = 16,
+    }
+);
+
+// AABB overlap query
+var results = new List<Triangle>();
+bvh.QueryAABB(queryBox, results);
+
+// Ray cast — supply a per-leaf intersection callback
+bool hit = bvh.Raycast(
+    ray,
+    intersect: (tri, r) => TriangleRayHit(tri, r),
+    out Triangle hitTri,
+    out float hitDist
+);
+```
+
+### Dynamic `DynamicBvh<T>`
+
+`DynamicBvh<T>` uses a self-balancing incremental insertion strategy suitable for entities that move every frame. Nodes are identified by integer proxy IDs returned on insertion.
+
+```csharp
+var dynBvh = new DynamicBvh<Entity>(margin: 0.1f);
+
+// Insert — returns a stable proxy ID
+int proxyId = dynBvh.Add(entity, entity.WorldBounds);
+
+// Each frame: update only moved entities
+dynBvh.Update(proxyId, entity.WorldBounds);
+
+// Broad-phase overlap query
+dynBvh.QueryAABB(camera.FrustumAABB, visibleEntities =>
+{
+    // fine-phase test here
+});
+
+// Remove when the entity is destroyed
+dynBvh.Remove(proxyId);
+```
+
+<Tip>
+Set `DynamicBvh<T>.Margin` to a small positive value (e.g., `0.1f`) to fatten node AABBs and reduce update frequency; nodes are only re-inserted when the object moves outside the fattened bounds.
+</Tip>
+
+---
+
+## Random Number Generation
+
+`RNG` wraps the xoshiro256\*\* algorithm — a fast, high-quality PRNG suitable for game use. It is a class (not a struct), so you can pass it by reference without copies. A global `RNG.Shared` instance is available for quick scripting; create seeded instances for reproducible simulations.
+
+```csharp
+// Shared global instance (not thread-safe)
+RNG rng = RNG.Shared;
+
+// Seeded instance for deterministic sequences
+var seeded = new RNG(seed: 42);
+
+// --- Scalars ---
+double d   = rng.NextDouble();          // [0, 1)
+float  f   = rng.NextFloat();           // [0, 1)
+int    n   = rng.Range(0, 100);         // [0, 100] inclusive
+float  rf  = rng.Range(0f, 10f);        // [0, 10)
+
+// --- Vectors ---
+Float3 v3  = rng.NextFloat3();
+Float3 dir = rng.OnUnitSphere();        // uniformly distributed direction
+Float2 pt  = rng.InsideUnitCircle();    // uniform 2D disc sample
+
+// --- Colors ---
+Float4 opaqueColor = rng.NextColor();             // random RGB, A=1
+Float4 anyColor    = rng.NextColorWithAlpha();    // random RGBA
+Float4 hsvColor    = rng.NextColorHSV(
+    hueRange:        new Float2(0.0f, 0.3f),     // green-ish hues
+    saturationRange: new Float2(0.7f, 1.0f),
+    valueRange:      new Float2(0.5f, 1.0f)
+);
+
+// --- Distribution ---
+float gaussian = rng.NextGaussian(mean: 0f, standardDeviation: 1f);
+bool  rare     = rng.Chance(0.05f);              // 5% probability
+
+// --- Collection utilities ---
+string[] names   = ["Alice", "Bob", "Carol"];
+string   picked  = rng.Choice(names);
+rng.Shuffle(names);                              // in-place Fisher–Yates
+```

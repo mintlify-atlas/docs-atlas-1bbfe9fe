@@ -1,0 +1,399 @@
+---
+title: "Prowl.Quill: GPU-Accelerated 2D Vector Graphics Canvas"
+sidebarTitle: "Quill"
+description: "Prowl.Quill provides a Canvas-like API for anti-aliased 2D vector graphics with pluggable GPU backends, SVG parsing, and Scribe font integration."
+---
+
+Prowl.Quill is a hardware-accelerated 2D vector graphics library built for the Prowl Game Engine ecosystem. It exposes a `Canvas` API modelled after HTML5 Canvas and NanoVG — `BeginPath`, `MoveTo`, `LineTo`, `Fill`, `Stroke` — while tessellating every path into GPU geometry that a pluggable `ICanvasRenderer` backend submits to whatever graphics API is in use. The result is pixel-perfect anti-aliased shapes, gradients, curves, clipping regions, and text with practically zero driver friction, all in under 1,000 lines of executable library code.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Quill
+```
+
+## Backend Setup
+
+All rendering is delegated to `ICanvasRenderer`, a thin interface your graphics backend implements:
+
+```csharp
+public interface ICanvasRenderer : IDisposable
+{
+    object CreateTexture(uint width, uint height);
+    Int2 GetTextureSize(object texture);
+    void SetTextureData(object texture, IntRect bounds, byte[] data);
+    void RenderCalls(Canvas canvas, IReadOnlyList<DrawCall> drawCalls);
+    bool SupportsBackdropBlur => false;
+}
+```
+
+Pre-built backend packages are available for the most common .NET graphics stacks:
+
+<CardGroup cols={2}>
+  <Card title="OpenTK" icon="window">
+    `Prowl.Quill.OpenTK` — OpenGL 3.3+ backend via OpenTK.
+  </Card>
+  <Card title="Silk.NET" icon="spider-web">
+    `Prowl.Quill.Silk` — OpenGL ES / OpenGL backend via Silk.NET.
+  </Card>
+  <Card title="Raylib" icon="bullseye-arrow">
+    `Prowl.Quill.Raylib` — Raylib-cs backend.
+  </Card>
+  <Card title="SFML" icon="gamepad">
+    `Prowl.Quill.SFML` — SFML.Net OpenGL backend.
+  </Card>
+</CardGroup>
+
+## Creating a Canvas
+
+Instantiate `Canvas` with an `ICanvasRenderer` and an optional `FontAtlasSettings` for text rendering:
+
+```csharp
+ICanvasRenderer renderer = new MyRenderer();
+FontAtlasSettings atlasSettings = new FontAtlasSettings
+{
+    AtlasWidth = 1024,
+    AtlasHeight = 1024,
+};
+
+Canvas canvas = new Canvas(renderer, atlasSettings);
+```
+
+Every frame follows a **BeginFrame → draw calls → Render** lifecycle:
+
+```csharp
+// Start a new frame, supplying the viewport size and device pixel ratio.
+canvas.BeginFrame(width: 1280, height: 720, framebufferScale: 1.0f);
+
+// ... all drawing commands go here ...
+
+// Tessellate paths and flush draw calls to the backend.
+canvas.Render();
+```
+
+<Warning>
+All path and shape methods must be called between `BeginFrame` and `Render`. Geometry recorded outside that window is discarded.
+</Warning>
+
+## Drawing Paths
+
+Quill's path API is a direct analogue of the HTML5 Canvas 2D path model. Start a new path, issue contour commands, and close or fill/stroke it:
+
+```csharp
+canvas.BeginPath();
+canvas.MoveTo(50, 50);
+canvas.LineTo(150, 50);
+canvas.LineTo(100, 150);
+canvas.ClosePath();
+
+canvas.SetFillColor(Color.FromArgb(180, 100, 100, 255));
+canvas.SetStrokeColor(Color.FromArgb(255, 255, 255, 255));
+canvas.SetStrokeWidth(3.0);
+canvas.FillAndStroke();
+```
+
+### Complete Path Example
+
+```csharp
+canvas.BeginFrame(800, 600, 1.0f);
+
+// Cubic Bézier arc
+canvas.BeginPath();
+canvas.MoveTo(50, 300);
+canvas.BezierCurveTo(100, 100, 300, 500, 350, 300);
+canvas.SetStrokeColor(Color.FromArgb(255, 100, 220, 255));
+canvas.SetStrokeWidth(4.0);
+canvas.Stroke();
+
+// Quadratic Bézier
+canvas.BeginPath();
+canvas.MoveTo(400, 150);
+canvas.QuadBezierCurveTo(500, 50, 600, 150);
+canvas.SetStrokeColor(Color.FromArgb(255, 255, 200, 80));
+canvas.SetStrokeWidth(2.0);
+canvas.Stroke();
+
+// Half-circle arc
+canvas.BeginPath();
+canvas.Arc(200, 450, 60, 0, Math.PI);
+canvas.SetFillColor(Color.FromArgb(160, 255, 100, 100));
+canvas.Fill();
+
+canvas.Render();
+```
+
+Available path commands:
+
+| Method | Description |
+|---|---|
+| `BeginPath()` | Clears the current path |
+| `MoveTo(x, y)` | Start a new sub-path at the given point |
+| `LineTo(x, y)` | Straight line to the given point |
+| `BezierCurveTo(c1x, c1y, c2x, c2y, x, y)` | Cubic Bézier curve |
+| `QuadBezierCurveTo(cx, cy, x, y)` | Quadratic Bézier curve |
+| `Arc(cx, cy, r, a0, a1)` | Circular arc |
+| `ClosePath()` | Close the current sub-path with a straight line |
+| `Fill()` | Fill the current path |
+| `Stroke()` | Stroke the current path |
+| `FillAndStroke()` | Fill then stroke in one call |
+
+## Shapes API
+
+Quill provides convenience methods that construct common shapes without manual path commands:
+
+```csharp
+// Axis-aligned rectangle (stroke only)
+canvas.SetStrokeColor(Color.Blue);
+canvas.Rect(10, 10, 200, 100);
+canvas.Stroke();
+
+// Filled rectangle
+canvas.RectFilled(250, 10, 200, 100, Color.FromArgb(200, 50, 200, 50));
+
+// Rounded rectangle — per-corner radii
+canvas.SetFillColor(Color.FromArgb(200, 100, 180, 255));
+canvas.RoundedRect(10, 130, 200, 100, 12, 12, 12, 12);
+canvas.Fill();
+
+// Circle (stroke) and filled circle
+canvas.Circle(480, 180, 60);
+canvas.Stroke();
+canvas.CircleFilled(620, 180, 60, Color.FromArgb(180, 255, 140, 60));
+
+// Ellipse
+canvas.Ellipse(150, 320, 90, 45);
+canvas.Fill();
+
+// Pie slice
+canvas.Pie(400, 300, 80, 0.2f, 1.8f); // cx, cy, r, startAngle, endAngle
+canvas.Fill();
+```
+
+## Fill & Stroke Styles
+
+```csharp
+// Solid fill / stroke colour
+canvas.SetFillColor(Color.FromArgb(255, 80, 160, 255));
+canvas.SetStrokeColor(Color.White);
+
+// Stroke width
+canvas.SetStrokeWidth(6.0);
+
+// Line join style
+canvas.SetStrokeJoint(JointStyle.Round);   // Miter | Round | Bevel
+
+// End cap styles (start and end independently)
+canvas.SetStrokeStartCap(EndCapStyle.Round);  // Butt | Round | Square | Bevel
+canvas.SetStrokeEndCap(EndCapStyle.Square);
+
+// Miter limit (only relevant for JointStyle.Miter)
+canvas.SetMiterLimit(4.0f);
+```
+
+`JointStyle` controls how adjacent polyline segments connect at their shared vertex:
+
+| Value | Description |
+|---|---|
+| `Miter` | Sharp pointed join; capped by miter limit |
+| `Round` | Circular arc fill between the segments |
+| `Bevel` | Flat cut-off join |
+
+`EndCapStyle` controls how open paths terminate:
+
+| Value | Description |
+|---|---|
+| `Butt` | No extension; straight edge at the endpoint |
+| `Round` | Semicircular cap |
+| `Square` | Rectangular cap extending half stroke-width |
+| `Bevel` | Bevelled rectangular cap |
+
+## Gradients & Brushes
+
+Quill supports three gradient types controlled by the `BrushType` enum (`None`, `Linear`, `Radial`, `Box`):
+
+```csharp
+// Linear gradient along a line between two points.
+canvas.SetLinearBrush(
+    x1: 0,   y1: 0,
+    x2: 200, y2: 0,
+    color1: Color32.Red,
+    color2: Color32.Blue);
+canvas.RoundedRect(0, 0, 200, 80, 10, 10, 10, 10);
+canvas.Fill();
+
+// Radial gradient — inner and outer circles.
+canvas.SetRadialBrush(
+    centerX: 300, centerY: 100,
+    innerRadius: 10, outerRadius: 60,
+    innerColor: Color32.White,
+    outerColor: Color32.FromArgb(0, 255, 255, 255));
+canvas.CircleFilled(300, 100, 60, default);
+canvas.Fill();
+
+// Box gradient — rounded rectangle with soft edges.
+canvas.SetBoxBrush(
+    centerX: 500, centerY: 100,
+    width: 100, height: 60,
+    radi: 8, feather: 12,
+    innerColor: Color32.Yellow,
+    outerColor: Color32.FromArgb(0, 255, 255, 0));
+canvas.RoundedRect(450, 70, 100, 60, 8, 8, 8, 8);
+canvas.Fill();
+```
+
+## State Stack
+
+Quill maintains a state stack that captures the current transform, scissor region, stroke/fill style, and shader. Push and pop states around transformed sub-sections:
+
+```csharp
+canvas.SaveState();
+
+canvas.TransformBy(Transform2D.CreateTranslation(200, 200));
+canvas.TransformBy(Transform2D.CreateRotate(45.0 * Math.PI / 180.0));
+canvas.TransformBy(Transform2D.CreateScale(0.75, 0.75));
+
+canvas.RectFilled(-50, -50, 100, 100, Color.FromArgb(200, 255, 150, 50));
+
+canvas.RestoreState();
+```
+
+| Method | Description |
+|---|---|
+| `SaveState()` | Push a copy of the current state |
+| `RestoreState()` | Pop and apply the saved state |
+| `ResetState()` | Reset to the canvas default state |
+| `TransformBy(Transform2D)` | Concatenate a 2D affine transform |
+
+## Clipping
+
+Scissor regions are axis-aligned rectangles that clip all subsequent drawing. They respect the current transform stack:
+
+```csharp
+canvas.SaveState();
+
+// Set a clip rectangle (in local/transformed space).
+canvas.Scissor(100, 100, 300, 200);
+
+// Only geometry inside the scissor is visible.
+canvas.CircleFilled(200, 200, 120, Color.FromArgb(180, 255, 100, 200));
+
+// Intersect with a smaller rectangle.
+canvas.IntersectScissor(150, 120, 100, 80);
+canvas.RectFilled(150, 120, 100, 80, Color.FromArgb(200, 100, 200, 255));
+
+// Clear the scissor.
+canvas.ResetScissor();
+
+canvas.RestoreState();
+```
+
+## SVG Support
+
+`SVGParser.Parse` converts SVG markup into a tree of `SvgElement` objects, and `SVGRenderer` walks that tree issuing Quill canvas calls:
+
+```csharp
+string svgSource = File.ReadAllText("icon.svg");
+SvgElement root = SVGParser.Parse(svgSource);
+
+canvas.BeginFrame(512, 512, 1.0f);
+SVGRenderer.Render(canvas, root, offsetX: 0, offsetY: 0, scale: 1.0f);
+canvas.Render();
+```
+
+Supported `SvgElement` subtypes:
+
+| Type | SVG element |
+|---|---|
+| `SvgRectElement` | `<rect>` |
+| `SvgCircleElement` | `<circle>` |
+| `SvgEllipseElement` | `<ellipse>` |
+| `SvgLineElement` | `<line>` |
+| `SvgPolylineElement` | `<polyline>` |
+| `SvgPolygonElement` | `<polygon>` |
+| `SvgPathElement` | `<path>` (full `d` attribute command set) |
+
+Fill and stroke paint are carried through `SvgPaintContext`, which handles solid colours, `none`, and `currentColor`.
+
+## Text Rendering
+
+Quill integrates with Prowl.Scribe through the `TextRenderer` class, which implements `IFontRenderer`. Supply a `FontAtlasSettings` when constructing the `Canvas` to configure the atlas:
+
+```csharp
+FontAtlasSettings atlasSettings = new FontAtlasSettings
+{
+    AtlasWidth = 1024,
+    AtlasHeight = 1024,
+    // Additional glyph quality and padding settings.
+};
+
+Canvas canvas = new Canvas(renderer, atlasSettings);
+```
+
+Text is drawn through the embedded `FontSystem` on the canvas. Retrieve the `TextRenderer` to call Scribe's `FontSystem` API directly for advanced layout and rich text.
+
+## Custom Shaders
+
+Replace the built-in canvas shader for any draw call with `SetCustomShader`, then push uniform values by name. Shapes with the same shader reference and identical `ShaderUniforms` hash are automatically batched:
+
+```csharp
+// obj is a backend-specific shader handle (e.g. a GL program id).
+canvas.SetCustomShader(myShaderObject);
+
+// Set typed uniform values. Supported: float, int, Float2, Float3, Float4, Float4x4.
+canvas.SetShaderUniform("uTime", (float)elapsed.TotalSeconds);
+canvas.SetShaderUniform("uResolution", new Float2(width, height));
+
+canvas.RectFilled(0, 0, width, height, Color.White);
+canvas.Fill();
+
+// Clear back to the default shader.
+canvas.SetCustomShader(null);
+```
+
+The `ShaderUniforms` class stores uniform values in a `Dictionary<string, object>` and computes a stable hash for batching purposes. `DrawCall.ShaderUniforms` exposes it to the backend at render time.
+
+## Complete Frame Example
+
+```csharp
+canvas.BeginFrame(800, 600, 1.0f);
+
+// Background
+canvas.RectFilled(0, 0, 800, 600, Color.FromArgb(255, 18, 20, 28));
+
+// Panel with rounded corners and gradient fill
+canvas.SetBoxBrush(200, 180, 400, 240, 16, 24,
+    Color32.FromArgb(255, 40, 44, 58),
+    Color32.FromArgb(255, 22, 24, 34));
+canvas.RoundedRect(0, 60, 400, 240, 16, 16, 16, 16);
+canvas.Fill();
+
+// Stroke border
+canvas.SetStrokeColor(Color.FromArgb(160, 100, 120, 200));
+canvas.SetStrokeWidth(1.5);
+canvas.RoundedRect(0, 60, 400, 240, 16, 16, 16, 16);
+canvas.Stroke();
+
+// Clipped content
+canvas.SaveState();
+canvas.Scissor(8, 68, 384, 224);
+
+canvas.SetLinearBrush(8, 68, 8, 292,
+    Color32.FromArgb(200, 120, 200, 255),
+    Color32.FromArgb(0,   120, 200, 255));
+canvas.CircleFilled(120, 180, 60, default);
+canvas.Fill();
+
+canvas.ResetScissor();
+canvas.RestoreState();
+
+// Path-based arrow
+canvas.BeginPath();
+canvas.MoveTo(450, 150);
+canvas.LineTo(600, 200);
+canvas.LineTo(450, 250);
+canvas.ClosePath();
+canvas.SetFillColor(Color.FromArgb(220, 255, 220, 60));
+canvas.Fill();
+
+canvas.Render();
+```

@@ -1,20 +1,76 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "Prowl Anthology: Modular C# Libraries for Game Development"
+sidebarTitle: "Home"
+description: "Prowl Anthology is a collection of 23 independently-installable Prowl.* NuGet packages covering math, rendering, UI, physics, networking, serialization, and more."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+Prowl Anthology is the set of modular C# libraries that power the [Prowl game engine](https://github.com/ProwlEngine/Prowl). Each library ships as its own `Prowl.*` NuGet package and can be used independently in any .NET project — from game engines to desktop tools. They version together in a single repository so cross-library changes land in one commit with no publish chain.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what Anthology is, how it's organized, and which packages suit your use case.
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install your first Prowl package and write working code in under five minutes.
+  </Card>
+  <Card title="All Packages" icon="grid-2" href="/packages">
+    Browse the full catalog of 23 Prowl.* NuGet packages with descriptions and links.
+  </Card>
+  <Card title="GitHub" icon="github" href="https://github.com/ProwlEngine/Anthology">
+    View source code, open issues, and contribute to the project.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## Libraries at a Glance
+
+<CardGroup cols={3}>
+  <Card title="Prowl.Vector" icon="vector-square" href="/libraries/vector">
+    32/64-bit math — vectors, matrices, quaternions, noise, CSG, and BVH
+  </Card>
+  <Card title="Prowl.Graphite" icon="microchip" href="/libraries/graphite">
+    Low-level Vulkan GPU abstraction with a declarative render graph
+  </Card>
+  <Card title="Prowl.Quill" icon="pen-nib" href="/libraries/quill">
+    Hardware-accelerated anti-aliased 2D vector graphics canvas
+  </Card>
+  <Card title="Prowl.Paper" icon="window" href="/libraries/paper">
+    Immediate-mode UI framework with animations and event bubbling
+  </Card>
+  <Card title="Prowl.Origami" icon="table-columns" href="/libraries/origami">
+    Full widget library with charts, docking layouts, and 3D gizmos
+  </Card>
+  <Card title="Prowl.Echo" icon="database" href="/libraries/echo">
+    High-performance serializer with Roslyn source generation
+  </Card>
+  <Card title="Prowl.Clay" icon="cube" href="/libraries/clay">
+    Pure-C# 3D model importer for glTF 2.0, FBX, and OBJ
+  </Card>
+  <Card title="Prowl.Wicked" icon="network-wired" href="/libraries/wicked">
+    IL-weaved authoritative networking with RPCs and SyncVars
+  </Card>
+  <Card title="Prowl.Drift" icon="circle-dot" href="/libraries/drift">
+    2D rigid-body physics with SAT collision and 8 joint types
+  </Card>
+  <Card title="Prowl.Recast" icon="route" href="/libraries/recast">
+    Navmesh generation and pathfinding via the DotRecast port
+  </Card>
+  <Card title="Prowl.Aperture" icon="image" href="/libraries/aperture">
+    Dependency-free image loader supporting 14 formats
+  </Card>
+  <Card title="Prowl.Ember" icon="fire" href="/libraries/ember">
+    Live hot-reload migration of object graphs at runtime
+  </Card>
+</CardGroup>
+
+## Why Anthology?
+
+All packages share a **single version number**, set in one place. Tag `vX.Y.Z` and CI builds, packs, and pushes every package simultaneously — no cross-repo version juggling. Use the libraries you need; ignore the rest.
+
+<CardGroup cols={2}>
+  <Card title="Math & Geometry" icon="shapes" href="/libraries/vector">
+    Prowl.Vector provides comprehensive 32/64-bit math types used across the entire Anthology ecosystem.
+  </Card>
+  <Card title="Contributing" icon="code-pull-request" href="/contributing/monorepo">
+    Learn how Anthology's monorepo works and how to merge an independent library into the collection.
+  </Card>
+</CardGroup>

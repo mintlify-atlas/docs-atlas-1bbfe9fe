@@ -1,0 +1,85 @@
+---
+title: "Prowl Anthology: Modular C# Libraries for Game Engines"
+sidebarTitle: "Introduction"
+description: "Prowl Anthology ships 23 independent Prowl.* NuGet packages covering math, rendering, UI, physics, networking, and more — each usable standalone."
+---
+
+Prowl Anthology is the official collection of modular C# libraries that powers the [Prowl game engine](https://github.com/ProwlEngine/Prowl). Every capability — from 32-bit and 64-bit vector math to GPU-accelerated 2D graphics, immediate-mode UI, CPU lightmapping, high-level networking, and hot reload — ships as its own `Prowl.*` NuGet package. You can drop a single package into any .NET project and use it independently, or take the full suite when building a game engine from scratch. There are no mandatory dependencies between packages unless the feature explicitly requires another domain (for example, `Prowl.Quill` builds on `Prowl.Scribe` for font layout).
+
+## The Monorepo Philosophy
+
+All 23 packages live and version together in a single repository. That design decision has a precise motivation: a change that touches multiple packages — say, a `Float3` API tweak that ripples through both `Prowl.Vector` and `Prowl.Graphite` — lands in one commit, is reviewed in one pull request, and ships in one tag. There is no cross-repo version juggling, no publish chain to orchestrate, and no risk of a consumer accidentally mixing incompatible versions of sibling packages.
+
+Each library occupies its own top-level folder. History is preserved per folder using `git-filter-repo` when a library is folded in, so `git log -- Scribe/` reveals the complete past of the Scribe library, even across repositories. Shared build and packaging rules live in a single root `Directory.Build.props`; individual project files stay small and focused on what makes each library different.
+
+## Package Overview
+
+The table below lists every library folder, its NuGet package name, and its purpose at a glance.
+
+| Folder | Package | Purpose |
+|---|---|---|
+| `Vector` | `Prowl.Vector` | Math and geometry primitives |
+| `Scribe` | `Prowl.Scribe` | TrueType fonts, layout, Markdown |
+| `Quill` | `Prowl.Quill` | GPU 2D vector graphics |
+| `Paper` | `Prowl.Paper` | Immediate-mode UI framework |
+| `Scaffold` | `Prowl.Scaffold` | Incremental UI layout engine |
+| `Origami` | `Prowl.Origami` | UI widgets and components for Paper |
+| `Echo` | `Prowl.Echo` | High-performance serialization |
+| `Clay` | `Prowl.Clay` | 3D model loading (GLTF / FBX / OBJ) |
+| `Crumb` | `Prowl.Crumb` | Lightweight tokenizer |
+| `Photonic` | `Prowl.Photonic` | Progressive CPU lightmapper |
+| `Unwrapper` | `Prowl.Unwrapper` | Mesh UV unwrapping |
+| `Wicked` | `Prowl.Wicked` | High-level networking with IL-woven RPCs |
+| `Rosetta` | `Prowl.Rosetta` | Localization utilities |
+| `Drift` | `Prowl.Drift` | 2D physics engine |
+| `Slang` | `Prowl.Slang` | Slang compiler bindings |
+| `Graphite` | `Prowl.Graphite` | Low-level GPU graphics (Vulkan) |
+| `Recast` | `Prowl.Recast` | Navmesh generation and pathfinding |
+| `Aperture` | `Prowl.Aperture` | Image loading (14 formats) |
+| `Ember` | `Prowl.Ember` | Hot reload / assembly state migration |
+
+## Versioning Strategy
+
+The entire family ships under one version number, defined once in `Directory.Build.props`:
+
+```xml
+<!-- Directory.Build.props -->
+<Version>3.4.0</Version>
+```
+
+To release, bump that single line and tag the commit `vX.Y.Z`. CI picks up the tag, builds every project, packs every NuGet package at the new version, and pushes them all at once. Because every package is always at the same version, you can safely mix any combination of `Prowl.*` packages in a single project without worrying about compatibility matrices.
+
+<Note>
+  The baseline version started above `2.3.0` — higher than the highest legacy package (`Prowl.Echo 2.2.1`) — so the first Anthology publish of any package is never treated as older than what NuGet already has.
+</Note>
+
+## Target Frameworks
+
+Two shared framework sets are defined in `Directory.Build.props` and referenced by library projects:
+
+```xml
+<!-- Modern set — every library supports at minimum net8, net9, net10 -->
+<ProwlTargetFrameworks>net8.0;net9.0;net10.0</ProwlTargetFrameworks>
+
+<!-- Compat set — adds netstandard2.1 for Unity and older runtime support -->
+<ProwlTargetFrameworksCompat>netstandard2.1;net8.0;net9.0;net10.0</ProwlTargetFrameworksCompat>
+```
+
+Libraries that also need to support Unity or other `netstandard2.1` consumers opt into `ProwlTargetFrameworksCompat`. On `netstandard2.1` targets, a build-only reference to [PolySharp](https://github.com/Sergio0694/PolySharp) polyfills the language-feature attributes (`init`, `required`, records) that the runtime lacks; it generates nothing on `net8+` where those types already exist.
+
+`Prowl.Graphite` and its shader sub-packages target `net10.0` only, because they depend on cutting-edge Vulkan interop features available exclusively on the current runtime.
+
+<Tip>
+  When adding multiple `Prowl.*` packages to a project, pin them all to the same version string. Since the whole family ships together, mixing versions is unsupported and will produce build warnings.
+</Tip>
+
+## Where to Go Next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install your first package and write working code in minutes — covers Vector math, Echo serialization, and Aperture image loading.
+  </Card>
+  <Card title="Package Catalog" icon="box-open" href="/packages">
+    Full reference of all 23 NuGet packages organized by domain, with install commands and framework targets.
+  </Card>
+</CardGroup>

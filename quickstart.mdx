@@ -1,47 +1,196 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with Prowl Anthology in Minutes"
+sidebarTitle: "Quickstart"
+description: "Install a Prowl.* NuGet package and write your first working code — covers Vector math, serialization with Echo, and image loading with Aperture."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
-
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+Every `Prowl.*` package is a standalone NuGet library — there is no engine runtime to install, no project template to scaffold, and no global tooling to configure. You pick the capability you need, add one `<PackageReference>`, and start writing code. This guide walks you from a bare .NET project through three representative packages: `Prowl.Vector` for math, `Prowl.Echo` for serialization, and `Prowl.Aperture` for image loading. Each section is independent — jump directly to the package you need most.
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+
+  <Step title="Prerequisites">
+    You need the **.NET 8 SDK or later** installed on your machine. Most packages in the Anthology family target `net8.0`, `net9.0`, and `net10.0`.
+
+    <Note>
+      **`Prowl.Graphite`** targets `net10.0` only. If you intend to use the low-level Vulkan graphics package, make sure you have the .NET 10 SDK installed and your project's `<TargetFramework>` set to `net10.0`.
+    </Note>
+
+    Check your installed SDK version:
 
     ```bash
-    npm install your-package
+    dotnet --version
     ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+
+    Create a new console project to follow along:
 
     ```bash
-    your-cli init
+    dotnet new console -n AnthologyDemo
+    cd AnthologyDemo
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
 
-    ```bash
-    your-cli start
+  <Step title="Install a Package">
+    Every `Prowl.*` package is published to NuGet.org. Install `Prowl.Vector` — the math foundation shared by most other packages — using either the CLI or a direct `<PackageReference>`.
+
+    <CodeGroup>
+
+    ```bash dotnet CLI
+    dotnet add package Prowl.Vector
     ```
+
+    ```xml PackageReference
+    <PackageReference Include="Prowl.Vector" Version="3.4.0" />
+    ```
+
+    </CodeGroup>
+
+    Because every package in the Anthology family ships at the same version, you can use the exact same version string for any combination of `Prowl.*` packages you add later.
   </Step>
+
+  <Step title="Write Your First Math Code">
+    `Prowl.Vector` provides 32-bit and 64-bit vector types (`Float2`, `Float3`, `Float4`, `Double3`, …), matrices, quaternions, bounding shapes, and a comprehensive `Maths` static class covering interpolation, trigonometry, noise, and more. All types are plain value structs with no heap allocation.
+
+    ```csharp
+    using Prowl.Vector;
+
+    // 3D vectors and arithmetic
+    Float3 origin = new Float3(0f, 0f, 0f);
+    Float3 target = new Float3(10f, 5f, 3f);
+
+    // Interpolate halfway between two points
+    Float3 mid = Maths.Lerp(origin, target, 0.5f);
+
+    // Euclidean distance between two points
+    float dist = Float3.Distance(origin, target);
+
+    // Quaternion rotation — 90 degrees around the Y axis
+    Quaternion rot = Quaternion.FromEuler(0f, 90f, 0f);
+    Float3 rotated = rot * new Float3(1f, 0f, 0f);
+
+    // Axis-aligned bounding box
+    var box = new AABB(origin, target);
+    bool contains = box.Contains(mid);   // true — mid is inside the box
+
+    Console.WriteLine($"Distance: {dist:F2}");
+    Console.WriteLine($"Rotated:  {rotated}");
+    Console.WriteLine($"Contains: {contains}");
+    ```
+
+    <Tip>
+      `Maths.Lerp` clamps `t` to `[0, 1]` automatically. Use `Maths.LerpUnclamped` when you need extrapolation beyond the endpoints.
+    </Tip>
+  </Step>
+
+  <Step title="Try Serialization with Echo">
+    `Prowl.Echo` is a high-performance serializer that converts any object graph into an intermediate `EchoObject` — an inspectable, queryable tree that can then be written to JSON, YAML, binary, or Echo's own compact text format. It handles circular references, polymorphism, and complex collection types out of the box.
+
+    First, install the package:
+
+    <CodeGroup>
+
+    ```bash dotnet CLI
+    dotnet add package Prowl.Echo
+    ```
+
+    ```xml PackageReference
+    <PackageReference Include="Prowl.Echo" Version="3.4.0" />
+    ```
+
+    </CodeGroup>
+
+    Then serialize, inspect, and round-trip a simple object:
+
+    ```csharp
+    using Prowl.Echo;
+
+    public class PlayerData
+    {
+        public string Name = "Hero";
+        public int Score = 42;
+        public List<string> Inventory = ["Sword", "Shield"];
+    }
+
+    var player = new PlayerData();
+
+    // Serialize to Echo's intermediate representation
+    EchoObject echo = Serializer.Serialize(player);
+
+    // Write to a JSON stream
+    using var stream = new MemoryStream();
+    new JsonFileFormat().WriteTo(echo, stream);
+    string json = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+    Console.WriteLine(json);
+
+    // Round-trip back from JSON
+    stream.Position = 0;
+    EchoObject loaded = new JsonFileFormat().ReadFrom(stream);
+    PlayerData restored = Serializer.Deserialize<PlayerData>(loaded)!;
+    Console.WriteLine($"{restored.Name} — score {restored.Score}");
+    ```
+
+    <Info>
+      `JsonFileFormat` uses zero external dependencies and produces clean, standard JSON. For exact type-round-trip fidelity (preserving `float` vs `double`, `byte` vs `int`), use `EchoBinaryFormat` or `EchoTextFormat` instead.
+    </Info>
+  </Step>
+
+  <Step title="Load an Image with Aperture">
+    `Prowl.Aperture` provides a single, dependency-free API that identifies and decodes 14 image formats: BMP, DDS, EXR, GIF, HDR, ICO, JPEG, PNG, PNM, PSD, RAW, TGA, TIFF, and WebP. The `Image.Load` method returns a disposable `Image` containing one or more `ImageFrame` objects, each exposing its pixel data as a `Span<byte>`.
+
+    Install the package:
+
+    <CodeGroup>
+
+    ```bash dotnet CLI
+    dotnet add package Prowl.Aperture
+    ```
+
+    ```xml PackageReference
+    <PackageReference Include="Prowl.Aperture" Version="3.4.0" />
+    ```
+
+    </CodeGroup>
+
+    Load and inspect an image:
+
+    ```csharp
+    using Prowl.Aperture;
+
+    // Load an image from disk — format is detected automatically
+    using Image image = Image.Load("texture.png");
+    ImageFrame frame = image.RootFrame;
+    Console.WriteLine($"{frame.Width}x{frame.Height}, format: {image.PixelFormat}");
+
+    // Access raw pixel bytes (owned by the Image — do not use after Dispose)
+    Span<byte> pixels = frame.Pixels;
+    Console.WriteLine($"Pixel buffer: {pixels.Length} bytes");
+
+    // Request a specific pixel layout and flip for GPU upload
+    var options = new DecodeOptions
+    {
+        TargetPixelFormat = PixelFormat.Rgba8,
+        FlipVertically = true
+    };
+    using Image gpuReady = Image.Load("sprite.png", options);
+    Console.WriteLine($"GPU-ready size: {gpuReady.RootFrame.Pixels.Length} bytes");
+    ```
+
+    <Warning>
+      `ImageFrame.Pixels` returns a `Span<byte>` backed by pooled memory that is owned by the parent `Image`. Do not store the span or pass it to async code — wrap the image in a `using` block and copy the data if it needs to outlive the decode.
+    </Warning>
+  </Step>
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Explore Further
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+<CardGroup cols={3}>
+  <Card title="Prowl.Vector" icon="compass" href="/libraries/vector">
+    Full API reference for vectors, matrices, quaternions, bounding shapes, and the `Maths` utility class.
+  </Card>
+  <Card title="Prowl.Echo" icon="arrows-rotate" href="/libraries/echo">
+    Deep dive into serialization contexts, custom formatters, source generation, and all supported file formats.
+  </Card>
+  <Card title="Prowl.Aperture" icon="image" href="/libraries/aperture">
+    Details on all 14 decoders, `DecodeOptions`, multi-frame animations, mipmap chains, and encoding support.
+  </Card>
+</CardGroup>

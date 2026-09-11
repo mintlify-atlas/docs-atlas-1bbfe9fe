@@ -1,0 +1,254 @@
+---
+title: "Prowl Anthology Monorepo Structure and Build System"
+sidebarTitle: "Monorepo"
+description: "How the Anthology monorepo organizes 23 Prowl.* packages, how MSBuild cascades version and metadata, and how CI builds and publishes every package."
+---
+
+The Prowl Anthology monorepo is a single Git repository that houses all 23 `Prowl.*` NuGet packages side-by-side under one roof. The central philosophy is simple: a change that spans multiple libraries lands in a single commit rather than a fragile chain of cross-repo version bumps and dependency upgrades. Each library is still a fully self-contained folder — you can use `git log -- Vector/` to browse Vector's entire history in isolation — but they all ship together, version together, and are tested together before any release.
+
+---
+
+## Repository Layout
+
+At the top level you will find one folder per library, a shared solution file, and two MSBuild property files that cascade metadata to every project in the tree.
+
+```
+Anthology/
+├── Anthology.slnx             # Solution file — lists every project
+├── Directory.Build.props      # Shared metadata: version, authors, TFM macros
+├── Directory.Build.targets    # Pack/source-link rules gated on PackageId
+├── LICENSE
+├── README.md
+├── scripts/
+│   ├── Merge-Library.ps1      # PowerShell fold-in script
+│   ├── Merge-Library.sh       # Bash equivalent for Linux/macOS
+│   └── git-filter-repo        # Bundled Python tool — no install needed
+├── Vector/
+│   ├── Vector/                # Main library project
+│   └── Vector.Tests/
+├── Scribe/
+│   ├── Scribe/
+│   └── Scribe.Tests/
+├── Graphite/
+│   ├── Graphite/
+│   ├── Graphite.Compiler/
+│   ├── Graphite.ShaderDef/
+│   └── Graphite.Variants/
+└── … (one folder per library)
+```
+
+Each library folder is self-contained: it has its own `.csproj`, its own `README.md` (which gets packed into the NuGet package), and its own tests project. Nothing from one library's folder leaks into another's.
+
+<Note>
+The solution file is `Anthology.slnx` — the newer XML-based solution format introduced with Visual Studio 2022 17.10. Earlier tooling that only understands `.sln` files can still build individual projects directly via `dotnet build`.
+</Note>
+
+---
+
+## Version Strategy
+
+All 23 packages ship at the same version number, declared once in `Directory.Build.props`:
+
+```xml
+<Version>3.4.0</Version>
+```
+
+To release a new version:
+
+1. Update this single line.
+2. Commit the change.
+3. Push a tag named `v3.4.0` (matching the version).
+4. CI picks up the tag, runs all tests, packs every `.nupkg` and `.snupkg`, and pushes them all to NuGet.
+
+The baseline was set at `3.4.0` — deliberately above the highest version any individual package had published in its pre-Anthology life (the high-water mark was `Prowl.Echo 2.2.1`). This guarantees that the first Anthology publish of every package is always treated as a version _upgrade_ by NuGet clients, never as an older version that would be silently ignored.
+
+<Tip>
+Because all packages share a version, it is safe and expected that some packages will "version-jump" on a given release even if nothing changed in them. NuGet's `--skip-duplicate` flag in the CI push step makes this idempotent.
+</Tip>
+
+---
+
+## MSBuild Cascade
+
+The build system uses a classic two-layer MSBuild import cascade. Understanding which file does what prevents confusion when adding new libraries or customising an existing one.
+
+### Layer 1 — `Directory.Build.props`
+
+Imported **before** each project's own `<PropertyGroup>`. Sets universal metadata that is safe to apply everywhere, including test and sample projects that are never published:
+
+```xml
+<Project>
+  <PropertyGroup>
+    <Authors>Prowl Contributors</Authors>
+    <Company>Prowl Group</Company>
+    <Copyright>Copyright (c) Prowl Group 2026.</Copyright>
+    <NeutralLanguage>en-AU</NeutralLanguage>
+    <LangVersion>latest</LangVersion>
+
+    <!-- Single version for all 23 packages -->
+    <Version>3.4.0</Version>
+
+    <RepositoryUrl>https://github.com/ProwlEngine/Anthology</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/ProwlEngine/Anthology</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <!-- Shared TFM macros — library projects reference these instead of
+         hard-coding framework lists. Keeps upgrades to a single edit. -->
+    <ProwlTargetFrameworks>net8.0;net9.0;net10.0</ProwlTargetFrameworks>
+    <ProwlTargetFrameworksCompat>netstandard2.1;net8.0;net9.0;net10.0</ProwlTargetFrameworksCompat>
+  </PropertyGroup>
+
+  <!-- PolySharp back-fills language features on netstandard2.1 at build time only -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+    <PackageReference Include="PolySharp" Version="1.15.0" PrivateAssets="all" />
+  </ItemGroup>
+</Project>
+```
+
+A library that targets the standard three frameworks simply does this in its `.csproj`:
+
+```xml
+<TargetFrameworks>$(ProwlTargetFrameworks)</TargetFrameworks>
+```
+
+A library that also needs Unity / older runtime support opts into the compat set:
+
+```xml
+<TargetFrameworks>$(ProwlTargetFrameworksCompat)</TargetFrameworks>
+```
+
+### Layer 2 — `Directory.Build.targets`
+
+Imported **after** each project's own body, so it can read properties the project has declared — most importantly `$(PackageId)`. The entire block is gated on `PackageId != ''`, which means test projects, sample projects, and tools are silently unaffected.
+
+```xml
+<Project>
+  <PropertyGroup Condition="'$(PackageId)' != ''">
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Source Link embeds the commit SHA and repo URL into the PDB -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+
+    <!-- Symbols ship as a separate .snupkg -->
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <DebugType>portable</DebugType>
+
+    <!-- Deterministic builds on CI (set by the CI=true env var) -->
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!-- Pack the library's own README.md into the NuGet package root -->
+  <ItemGroup Condition="'$(PackageId)' != ''">
+    <None Include="$(MSBuildProjectDirectory)/../README.md"
+          Pack="true" PackagePath="\"
+          Condition="Exists('$(MSBuildProjectDirectory)/../README.md')" />
+  </ItemGroup>
+</Project>
+```
+
+### Per-Library Overrides
+
+Some libraries have build requirements that deviate from the shared baseline:
+
+| Library | Override | Why |
+|---------|----------|-----|
+| **Clay** | `<TreatWarningsAsErrors>true</TreatWarningsAsErrors>` | Stricter quality gate for the model-loading layer |
+| **Crumb** | `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` | Tokenizer uses unsafe pointer arithmetic for performance |
+| **Graphite** | Central `SilkNetVersion` property | Four sub-packages share a Silk.NET version to stay in sync |
+
+<Note>
+Per-library overrides live in the library's own `.csproj`, not in the shared files. This keeps the shared files minimal and avoids the need for `Condition` soup at the global level.
+</Note>
+
+---
+
+## CI/CD
+
+The GitHub Actions workflow in `.github/workflows/publish.yml` triggers on any tag matching `v*`. There is no API key secret: authentication uses NuGet's OIDC Trusted Publishing, which issues a short-lived token at publish time.
+
+### Workflow steps
+
+<Steps>
+  <Step title="Checkout and SDK setup">
+    The workflow checks out the repository and installs .NET **8**, **9**, and **10** SDKs in a single `actions/setup-dotnet@v4` step, because different libraries target different minimum frameworks and the pack step must build all TFMs.
+  </Step>
+  <Step title="Restore and Build">
+    ```bash
+    dotnet restore Anthology.slnx
+    dotnet build Anthology.slnx -c Release --no-restore
+    ```
+  </Step>
+  <Step title="Test (with exclusions)">
+    Most test suites run. Three categories are excluded because they require hardware the CI runner cannot provide:
+    - **Clay** — tests require local model assets not committed to the repo.
+    - **Prowl.Slang** (namespace `Prowl.Slang.Test`) — native binaries are fetched in the next step, after tests run.
+    - **Prowl.Graphite** (and sub-package test suites) — requires GPU backends or the Slang native compiler on a headless runner.
+
+    ```bash
+    dotnet test Anthology.slnx -c Release --no-build \
+      --filter "FullyQualifiedName!~Prowl.Clay.Tests\
+               &FullyQualifiedName!~Prowl.Slang.Test\
+               &FullyQualifiedName!~Prowl.Graphite"
+    ```
+  </Step>
+  <Step title="Fetch Slang native binaries">
+    Slang's native compiler binaries are not stored in Git. A small .NET script fetches them into `Slang/Native/runtimes/` so they can be bundled into the NuGet package.
+
+    ```bash
+    dotnet run --project Slang/Native/UpdateSources.cs
+    ```
+  </Step>
+  <Step title="Pack">
+    Because `Directory.Build.targets` sets `GeneratePackageOnBuild` for every project that has a `PackageId`, a single pack command produces all `.nupkg` and `.snupkg` artefacts:
+
+    ```bash
+    dotnet pack Anthology.slnx -c Release --no-build -o artifacts/nuget
+    ```
+  </Step>
+  <Step title="Push to NuGet">
+    OIDC login followed by a push with `--skip-duplicate` so that reruns of a tag do not fail when the packages are already present:
+
+    ```bash
+    dotnet nuget push "artifacts/nuget/*.nupkg" \
+      --api-key $NUGET_API_KEY \
+      --source https://api.nuget.org/v3/index.json \
+      --skip-duplicate
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Special Packaging Patterns
+
+A handful of packages ship more than just managed DLLs and need extra pack-time configuration.
+
+<Accordion title="Source generators (Echo, Slang, Wicked Weaver)">
+  These packages bundle Roslyn source-generator assemblies. The generator project is referenced with `ReferenceOutputAssembly="false"` and `OutputItemType="Analyzer"` so the generator is included in the pack but not linked as a normal runtime reference. Consumers get code generation at compile time without taking a runtime dependency on the generator assembly.
+</Accordion>
+
+<Accordion title="Native binaries (Prowl.Slang)">
+  `Prowl.Slang` wraps the native Slang shader compiler. Native `.dll` / `.so` / `.dylib` files are placed under `runtimes/<rid>/native/` inside the NuGet package, matching the standard .NET Runtime Identifier layout so the correct binary is loaded on each platform automatically. The CI step "Fetch Slang native binaries" populates this folder before `dotnet pack` runs.
+</Accordion>
+
+<Accordion title="MSBuild targets (Prowl.Wicked)">
+  `Prowl.Wicked` ships an MSBuild `.targets` file inside the package's `build/` folder. When a consumer project installs the package, the targets file is auto-imported by NuGet and runs the IL weaver as a build step — meaning the consumer's assemblies are automatically post-processed without any manual project-file edits.
+</Accordion>
+
+---
+
+## Git History Preservation
+
+One of the core promises of the Anthology approach is that the commit history of each library is fully preserved under its subfolder. When `Merge-Library.ps1` folds in a library, it uses `git-filter-repo` to rewrite every historical commit so the files appear under `<Name>/`. After the merge, you can inspect the complete history of any library in isolation:
+
+```bash
+git log --oneline -- Vector/    # every commit that touched Vector
+git log --oneline -- Scribe/    # every commit that touched Scribe
+git blame Vector/Vector/Maths.cs
+```
+
+This means contributors can run `git log` with path scoping to understand the evolution of a single package without any extra tooling or submodule indirection.

@@ -1,0 +1,343 @@
+---
+title: "Prowl.Graphite: Cross-Platform Low-Level GPU Graphics for .NET"
+sidebarTitle: "Graphite"
+description: "Prowl.Graphite is a Vulkan-backed GPU abstraction for .NET 10 with a declarative render graph, string-id resource binding, and an execution ring for CPU/GPU sync."
+---
+
+Prowl.Graphite is a cross-platform, low-level graphics and compute abstraction layer for .NET 10 that powers the rendering foundation of the Prowl Game Engine. Built on Vulkan (with macOS support via MoltenVK), Graphite departs from prior art like Veldrid by unifying shader pipeline state into a monolithic `ShaderProgram` model, hiding per-backend binding rules behind a string-id `PropertySet` API, and baking a frames-in-flight execution ring directly into `GraphicsDevice`. The result is a library that feels high-level enough to be productive while still exposing the full surface needed for AAA-quality rendering pipelines, custom postprocessing, and GPU compute.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Graphite
+```
+
+<Note>
+Prowl.Graphite targets **net10.0** exclusively. Ensure your project is on .NET 10 or later before adding the package.
+</Note>
+
+Graphite ships three related packages:
+
+| Package | Purpose |
+|---|---|
+| `Prowl.Graphite` | Core GPU abstraction: device, command buffers, textures, buffers, render graph |
+| `Prowl.Graphite.ShaderDef` | ShaderDef markup language parser and variant runtime |
+| `Prowl.Graphite.ShaderDef.Compiler` | Slang-based offline and runtime shader compilation |
+
+The core package has no native dependencies of its own. ShaderDef.Compiler pulls in the Prowl.Slang native binaries for Vulkan SPIR-V emission.
+
+## Architecture Overview
+
+Graphite organises rendering into three layers that build on each other:
+
+<CardGroup cols={3}>
+  <Card title="GraphicsDevice" icon="microchip">
+    The root object. Creates all GPU resources through its `ResourceFactory`, owns the swapchain, and drives the execution ring.
+  </Card>
+  <Card title="CommandBuffer" icon="list">
+    Records GPU work: state changes, draw calls, copies, compute dispatches. Obtained from and submitted through `RenderContext`, never manipulated directly.
+  </Card>
+  <Card title="ShaderProgram / PropertySet" icon="paintbrush">
+    `ShaderProgram` bundles vertex + fragment (or compute) shaders with all fixed-function state. `PropertySet` binds textures, buffers, and uniforms by name rather than by slot number.
+  </Card>
+</CardGroup>
+
+Above those three layers, **`RenderPipeline<TView>`** and the **`IPass<TView>`** family provide a declarative render graph that topologically sorts passes from their declared reads and writes and resolves transient, persistent, and history resources automatically.
+
+## Creating a GraphicsDevice
+
+The only current backend is Vulkan. Construct it with `GraphicsDevice.CreateVulkan`, supplying a `GraphicsDeviceOptions` struct, a `SwapchainDescription`, and a `VulkanDeviceOptions`:
+
+```csharp
+GraphicsDeviceOptions options = new()
+{
+    Debug = false,
+    SwapchainDepthFormat = PixelFormat.D24_UNorm_S8_UInt,
+    SyncToVerticalBlank = false,
+    PreferStandardClipSpaceYDirection = true
+};
+
+GraphicsDevice device = GraphicsDevice.CreateVulkan(options, swapchainDescription, vulkanOptions);
+```
+
+<Tip>
+Set `GraphicsDeviceOptions.EnableValidation` to `true` during development. The validation layer wraps every object with argument and state checks and throws descriptive exceptions on misuse. Disable it for release builds.
+</Tip>
+
+`GraphicsDevice` exposes device identity through several read-only properties:
+
+```csharp
+Console.WriteLine(device.DeviceName);   // e.g. "NVIDIA GeForce RTX 4090"
+Console.WriteLine(device.VendorName);
+Console.WriteLine(device.ApiVersion);
+Console.WriteLine(device.IsUvOriginTopLeft);      // true on Vulkan
+Console.WriteLine(device.IsDepthRangeZeroToOne);  // true on Vulkan
+```
+
+## Render Pipeline & Passes
+
+Graphite's render graph is declared once at startup and dispatched once per frame. You create a subclass of `RenderPipeline<TView>`, override `InitializePasses()`, and call `AddPass`/`SetPresentPass` for each pass. The pipeline lazily solves a topological order from declared resource reads and writes the first time `DispatchGraph` is called.
+
+Your view type must implement `IRenderView` (provides `PixelWidth` / `PixelHeight`):
+
+```csharp
+internal readonly struct SceneView : IRenderView
+{
+    public SceneView(uint width, uint height)
+    {
+        PixelWidth = width;
+        PixelHeight = height;
+    }
+
+    public uint PixelWidth { get; }
+    public uint PixelHeight { get; }
+}
+```
+
+A **present pass** draws the final output to the swapchain. Implement `IPresentPass<TView>`:
+
+```csharp
+internal sealed class TrianglePresentPass : IPresentPass<SceneView>
+{
+    private readonly Mesh _triangle;
+    private readonly GraphicsProgram _shader;
+
+    public TrianglePresentPass(Mesh triangle, GraphicsProgram shader)
+    {
+        _triangle = triangle;
+        _shader = shader;
+    }
+
+    public string Name => "Present";
+
+    // Called once (lazily). Declare which resources this pass needs.
+    public void Setup(PresentContextBuilder builder) => builder.RequestSwapchain();
+
+    // Called every frame dispatch.
+    public void Present(RenderContext<SceneView> context)
+    {
+        Framebuffer? target = context.SwapchainTarget;
+        if (target == null) return;
+
+        CommandBuffer cmd = context.GetCommandBuffer("Triangle");
+        cmd.SetFramebuffer(target);
+        cmd.ClearDepthStencil(1, 0);
+        cmd.ClearColorTarget(0, new Color(0.10f, 0.12f, 0.16f, 1.0f));
+        cmd.SetShader(_shader);
+        cmd.SetVertexSource(_triangle);
+        cmd.DrawIndexed();
+
+        context.SubmitCommandBuffer(cmd);
+        context.Present();
+    }
+}
+```
+
+For offscreen work, implement **`IPass<TView>`** (or extend the convenience base **`RasterPass<TView>`**):
+
+```csharp
+internal sealed class ScenePass : RasterPass<SceneView>
+{
+    private TextureHandle _colorTarget;
+
+    public override string Name => "Scene";
+
+    public override void Setup(RenderContextBuilder builder)
+    {
+        // Declare a view-relative RGBA16F color target.
+        GraphTextureDesc desc = GraphTextureDesc.ViewSized(PixelFormat.R16_G16_B16_A16_Float, hasDepth: true);
+        _colorTarget = SetTarget(builder, "SceneColor", desc);
+    }
+
+    public override void Render(RenderContext<SceneView> context)
+    {
+        CommandBuffer cmd = context.GetCommandBuffer("Scene");
+        BindTarget(context, cmd);
+        // ... issue draw calls ...
+        context.SubmitCommandBuffer(cmd);
+    }
+}
+```
+
+Wire passes together and dispatch per frame:
+
+```csharp
+internal sealed class TrianglePipeline : RenderPipeline<SceneView>
+{
+    private readonly IPresentPass<SceneView> _present;
+    public TrianglePipeline(IPresentPass<SceneView> present) => _present = present;
+    protected override void InitializePasses() => SetPresentPass(_present);
+}
+
+// Per-frame loop:
+SceneView[] views = { new SceneView(1280, 720) };
+device.DispatchGraph(pipeline, views);
+```
+
+## PropertySet — Resource Binding
+
+`PropertySet` is Graphite's cross-backend resource binding system. Instead of managing descriptor sets and binding slots, you reference everything by an interned string identifier wrapped in `PropertyID`. The device resolves the correct Vulkan descriptor set layout internally.
+
+```csharp
+// PropertyID is a lightweight string → int interning wrapper.
+PropertyID mainTex = "MainTexture";
+
+PropertySet props = new();
+
+// Texture + sampler pair (combined sampler on platforms that require it).
+props.SetTexture(mainTex, myTexture, mySampler);
+
+// Bind a sampler independently.
+props.SetSampler("SecondaryTexture_SamplerObject", linearClampSampler);
+
+// Transient uniform scalars — backed by the execution ring's bump allocator.
+props.SetFloat("Roughness", 0.6f);
+props.SetMatrix("ObjectMatrix", worldTransform);
+
+// SSBO buffer.
+props.SetBuffer("LightBuffer", lightBuffer);
+
+// Read-only UBO (SetX calls are ignored while readOnly is true).
+props.SetBuffer("PerFrameData", perFrameUbo, readOnly: true);
+
+// Writable UBO (SetX calls write into this buffer; you control its lifetime).
+props.SetBuffer("PerObjectData", perObjectUbo, readOnly: false);
+```
+
+Apply the property set to a command buffer before drawing:
+
+```csharp
+cmd.SetShader(myShader);
+cmd.ApplyProperties(props);
+cmd.DrawIndexed();
+```
+
+## Shader Programs
+
+`ShaderProgram` is the monolithic bundle of compiled shader code and fixed-function state. The two concrete types are:
+
+- **`GraphicsProgram`** — vertex + fragment shader pair with rasterizer, depth/stencil, and blend state.
+- **`ComputeProgram`** — compute shader.
+
+Both are created through `GraphicsDevice.ResourceFactory`. Fixed-function state is described with:
+
+```csharp
+BlendStateDescription blend = BlendStateDescription.SingleAlphaBlend;
+DepthStencilStateDescription depth = DepthStencilStateDescription.DepthOnlyLessEqual;
+RasterizerStateDescription raster = RasterizerStateDescription.Default;
+```
+
+When using the ShaderDef sub-package, `BlendStateDescription`, `DepthStencilStateDescription`, and `RasterizerStateDescription` are derived automatically from the `PassState` declared in the `.shaderdef` markup. Bind the active variant at draw time with the `SetShader` extension:
+
+```csharp
+// Resolves the active variant, overlays PassState, creates/reuses a GraphicsProgram.
+commandBuffer.SetShader(shaderPass);
+```
+
+## Execution Ring
+
+Rather than exposing raw `Fence` management, Graphite builds a frames-in-flight ring into `GraphicsDevice`. You rarely call these methods directly — `DispatchGraph` does it for you — but they are available for custom pipelines:
+
+```csharp
+// Grab a free ring slot. Blocks only if all MaxExecutingTasks slots are in flight.
+ExecutionTask task = device.BeginExecution();
+
+// ... rent CommandBuffers from a RenderContext and submit them ...
+
+// Signal the task's completion fence without blocking on the CPU.
+device.CompleteExecution(task);
+device.SwapBuffers();
+```
+
+Key members of `ExecutionTask`:
+
+| Member | Description |
+|---|---|
+| `ExecutionTask.Id` | Monotonically increasing ID (0 = none sentinel) |
+| `ExecutionTask.RingSlot` | Index in `[0, MaxExecutingTasks)` |
+| `ExecutionTask.CompletionFence` | Owned by the ring; do not hold past the next `BeginExecution` for the same slot |
+| `ExecutionTask.Device` | The owning `GraphicsDevice` |
+
+Configuration via `GraphicsDeviceOptions`:
+
+| Option | Default | Effect |
+|---|---|---|
+| `MaxFramesInFlight` | 3 | Ring depth (= `GraphicsDevice.MaxExecutingTasks`) |
+| `TransientBufferInitialSize` | 4 MB | Initial per-slot bump buffer |
+| `TransientBufferSoftCapBytes` | 64 MB | Per-execution soft cap — logs a one-shot warning if exceeded |
+| `TransientBufferHardCapBytes` | 256 MB | Per-execution hard cap — throws `RenderException` if exceeded |
+
+### Transient Memory
+
+Each ring slot owns a bump-allocated transient buffer. Allocate from it during a pass:
+
+```csharp
+DeviceBufferRange range = context.AllocateTransient(sizeInBytes);
+// range is valid for GPU use until this execution's CompletionFence signals.
+```
+
+This is what backs `PropertySet.SetFloat` / `SetMatrix` / `SetVector` transient uniforms.
+
+## Sub-Packages
+
+<Accordion title="Prowl.Graphite.ShaderDef">
+ShaderDef is a ShaderLab-inspired markup language that couples Slang shader source with GPU render state. A `.shaderdef` file describes a named shader, its properties, one or more passes, and a fallback:
+
+```
+Shader "Lit/Standard"
+{
+    Properties
+    {
+        _AlbedoMap("Albedo", Texture2D) = "" {}
+        _Roughness("Roughness", Float) = 0.5
+        _Color("Tint", Color) = (1, 1, 1, 1)
+    }
+
+    Pass 0
+    {
+        Name "ForwardLit"
+        Tags { "LightMode" = "ForwardBase" }
+        ZTest LessEqual
+        ZWrite On
+        Cull Back
+        Blend SourceAlpha InverseSourceAlpha
+
+        SLANGPROGRAM
+        // ... Slang vertex + fragment source ...
+        ENDSLANG
+    }
+
+    Fallback "Unlit/Default"
+}
+```
+
+**Variant axes** are not declared in markup — they are reflected from `extern` fields tagged `[VariantAxis]` in the Slang source. Bool axes produce two variants; enum axes produce one variant per case.
+
+The runtime types are `ShaderDefinition`, `ShaderPass`, and `PassState`. Call `ShaderParser.Parse` to parse the markup and `ShaderDefinition.Create` to create a device-backed shader object.
+</Accordion>
+
+<Accordion title="Prowl.Graphite.ShaderDef.Compiler">
+The Compiler package provides `SlangShaderCompiler`, the only implementation of `IShaderCompiler`. It owns a Slang `Session` and one registered `CompilerModule` per target backend (Vulkan, Metal, WebGPU).
+
+Compilation workflow:
+1. `SlangShaderCompiler.GetAxes(pass)` — reflects variant axes from the pass's Slang source.
+2. `SlangShaderCompiler.Compile(pass, combo, backend)` — synthesises a specialisation module that resolves all `extern` axis declarations, links it with the pass source and any axis-declaring modules, and emits SPIR-V (or MSL/WGSL) via the registered `CompilerModule`.
+
+Re-use a single `SlangShaderCompiler` instance across many shaders in the same build session to keep its loaded-module cache warm.
+</Accordion>
+
+## Key Types Reference
+
+| Type | Description |
+|---|---|
+| `GraphicsDevice` | Root object; creates resources, drives the execution ring, dispatches render graphs |
+| `CommandBuffer` | Records GPU commands; obtained and submitted only through `RenderContext` |
+| `ShaderProgram` | Abstract base for `GraphicsProgram` and `ComputeProgram` |
+| `PropertySet` | String-id resource binding: textures, samplers, uniforms, buffers |
+| `RenderPipeline<T>` | Declarative render graph; subclass and override `InitializePasses` |
+| `IPass<T>` | Single offscreen pass; declare resources in `Setup`, record commands in `Render` |
+| `Framebuffer` | Render target; a set of color/depth texture attachments |
+| `Texture` | GPU texture object; created via `ResourceFactory` |
+| `DeviceBuffer` | GPU buffer; supports vertex, index, uniform, storage, and indirect usages |
+| `Fence` | GPU synchronisation primitive; recycled by the execution ring |
+| `Swapchain` | Window surface swap chain; managed by the device |

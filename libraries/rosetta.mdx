@@ -1,0 +1,285 @@
+---
+title: "Prowl.Rosetta: Localization with CLDR Plural Rules and Provider Layers"
+sidebarTitle: "Rosetta"
+description: "Prowl.Rosetta is a backend-agnostic .NET localization library with CLDR plural rules, gender forms, named interpolation, and runtime locale switching."
+---
+
+Prowl.Rosetta is a lightweight, backend-agnostic localization library for .NET. It works anywhere — custom engines, desktop games, Unity projects, or any .NET application — without dependency injection or service locator boilerplate. A single static entry point `Loc.Get` is callable from anywhere in your codebase. Pluralization follows Unicode CLDR rules so languages with complex plural forms (Russian, Arabic, Polish) work correctly from the start. The library is designed to never throw in production: when a key is missing, it returns a fallback rather than crashing your game.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Rosetta
+```
+
+## Configuration
+
+Configure Rosetta once at application startup using the `Loc.Configure` fluent builder. Set a fallback locale, register one or more providers, and set the active locale.
+
+```csharp
+using Prowl.Rosetta;
+
+Loc.Configure(cfg => cfg
+    .SetFallbackLocale("en")
+    .AddProvider(new JsonFileProvider("Localization/{locale}.json"))
+    .SetLocale("en")
+    .OnMissingKey(MissingKeyBehavior.ReturnFallback)
+);
+```
+
+`LocConfig` exposes these fluent methods:
+
+<ParamField body="SetFallbackLocale(string locale)" type="LocConfig">
+  The locale to try when a key is absent in the active locale. Defaults to `"en"`.
+</ParamField>
+
+<ParamField body="AddProvider(ILocalizationProvider)" type="LocConfig">
+  Registers a translation source. Later providers win on key conflicts, enabling local-baseline + remote-override layering.
+</ParamField>
+
+<ParamField body="SetLocale(string locale)" type="LocConfig">
+  Sets the initial active locale and triggers a full provider load.
+</ParamField>
+
+<ParamField body="OnMissingKey(MissingKeyBehavior)" type="LocConfig">
+  Controls what `Loc.Get` returns when a key is absent. See [Missing Key Behavior](#missing-key-behavior).
+</ParamField>
+
+## Getting Strings
+
+`Loc.Get` is the primary lookup method. Use the overload with `object args` for named interpolation — placeholders use `{{name}}` double-brace syntax so translators always have context.
+
+```csharp
+// Plain lookup
+string confirm = Loc.Get("ui.button.confirm");
+// → "Confirm"
+
+// Named interpolation
+string greeting = Loc.Get("hud.greeting", new { player = "Zara", level = 12 });
+// → "Welcome back, Zara (Level 12)"
+```
+
+## Pluralization
+
+`Loc.GetPlural` selects the correct plural form for a count using built-in Unicode CLDR rules. This handles languages where pluralization depends on more than just whether the count equals one.
+
+```csharp
+string one  = Loc.GetPlural("item.collected", count: 1);
+// → "1 item"
+
+string many = Loc.GetPlural("item.collected", count: 7);
+// → "7 items"
+
+// With interpolation
+string msg = Loc.GetPlural("enemy.remaining", count: 3, new { zone = "Northgate" });
+// → "3 enemies remain in Northgate"
+```
+
+## Gender Forms
+
+`Loc.GetGender` selects a form based on a `Gender` enum value.
+
+```csharp
+using Prowl.Rosetta;
+
+string line = Loc.GetGender("npc.greeting", Gender.Female);
+// → "She smiles at you."
+
+string line2 = Loc.GetGender("npc.greeting", Gender.Male);
+// → "He nods at you."
+```
+
+`Gender` has three values: `Male`, `Female`, and `Other`.
+
+## Runtime Locale Switching
+
+Call `Loc.SetLocale` at any time to switch the active locale. All subsequent `Loc.Get` calls return strings from the new locale. Subscribe to `Loc.LocaleChanged` to refresh UI.
+
+```csharp
+Loc.SetLocale("fr");
+
+Loc.LocaleChanged += (oldLocale, newLocale) =>
+{
+    Console.WriteLine($"Locale changed: {oldLocale} → {newLocale}");
+    RefreshAllUI();
+};
+
+// Force a reload of all provider caches (e.g. after a live content update)
+Loc.Reload();
+```
+
+## Scoped Locale Overrides
+
+`Loc.BeginScope` temporarily overrides the active locale without changing the global setting. The scope is restored when the `IDisposable` is disposed.
+
+```csharp
+// Preview German translations without changing the global locale
+using (var scope = Loc.BeginScope("de"))
+{
+    string preview = Loc.Get("ui.title"); // uses "de" inside the block
+}
+// Global locale is restored here
+```
+
+This is useful for UI translation previews, localized NPC dialogue systems, and unit tests.
+
+## Translation File Format
+
+Rosetta uses flat JSON files by default. Keys use dot notation. Plain strings, named placeholders, plural objects, and gender objects are all valid values.
+
+```json
+{
+  "ui.button.confirm": "Confirm",
+
+  "hud.greeting": "Welcome back, {{player}} (Level {{level}})",
+
+  "item.collected": {
+    "one":   "{{count}} item",
+    "other": "{{count}} items"
+  },
+
+  "npc.greeting": {
+    "male":   "He nods at you.",
+    "female": "She smiles at you.",
+    "other":  "They glance over."
+  },
+
+  "enemy.remaining": {
+    "one":   "1 enemy remains in {{zone}}",
+    "other": "{{count}} enemies remain in {{zone}}"
+  }
+}
+```
+
+Configure the file path using the `{locale}` token so each locale resolves to its own file:
+
+```csharp
+new JsonFileProvider("Localization/{locale}.json")
+// Loads: Localization/en.json, Localization/fr.json, etc.
+```
+
+## Providers
+
+Providers are the source of truth for translations. They are tried in registration order, with **later providers winning on key conflicts**. This makes it straightforward to ship a bundled baseline and override it from a remote source.
+
+<CardGroup cols={3}>
+  <Card title="JsonFileProvider" icon="file-code">
+    Loads `.json` files from disk. Path supports the `{locale}` token for per-locale files.
+  </Card>
+  <Card title="EmbeddedResourceProvider" icon="box">
+    Loads from embedded assembly resources. Ideal for engine libraries and AOT-compiled projects.
+  </Card>
+  <Card title="InMemoryProvider" icon="database">
+    Loads from a `Dictionary<string, string>`. Perfect for unit tests — no file I/O required.
+  </Card>
+</CardGroup>
+
+```csharp
+// File-based (typical game project)
+Loc.Configure(cfg => cfg
+    .SetFallbackLocale("en")
+    .AddProvider(new JsonFileProvider("Localization/{locale}.json"))
+    .SetLocale("en")
+);
+
+// Embedded resources (library or engine with bundled strings)
+Loc.Configure(cfg => cfg
+    .SetFallbackLocale("en")
+    .AddProvider(new EmbeddedResourceProvider(Assembly.GetExecutingAssembly()))
+    .SetLocale("en")
+    .OnMissingKey(MissingKeyBehavior.ReturnKey)
+);
+
+// Layered: bundled baseline + remote overrides (last provider wins)
+Loc.Configure(cfg => cfg
+    .SetFallbackLocale("en")
+    .AddProvider(new JsonFileProvider("Localization/{locale}.json"))
+    .AddProvider(new MyRemoteProvider())
+    .SetLocale("en")
+);
+```
+
+### Custom Providers
+
+Implement `ILocalizationProvider` to integrate any backend — a database, a CMS, a remote JSON endpoint:
+
+```csharp
+public class MyRemoteProvider : ILocalizationProvider
+{
+    public IReadOnlyDictionary<string, string> Load(string locale)
+    {
+        // Return a flat key → value dictionary for this locale
+        return FetchFromBackend(locale);
+    }
+
+    public bool SupportsLocale(string locale) =>
+        _supportedLocales.Contains(locale);
+}
+
+// Register like any built-in provider
+Loc.Configure(cfg => cfg.AddProvider(new MyRemoteProvider()));
+```
+
+## Missing Key Behavior
+
+`MissingKeyBehavior` controls what `Loc.Get` returns when a key is absent in both the active locale and the fallback locale.
+
+<Tabs>
+  <Tab title="ReturnFallback (default)">
+    Tries the fallback locale first, then the key string itself. Safe for production.
+
+    ```csharp
+    .OnMissingKey(MissingKeyBehavior.ReturnFallback)
+    ```
+  </Tab>
+  <Tab title="ReturnKey">
+    Returns the raw key string (e.g., `"ui.button.confirm"`). Good for editors and development builds where you want to see untranslated keys rather than fallback text.
+
+    ```csharp
+    .OnMissingKey(MissingKeyBehavior.ReturnKey)
+    ```
+  </Tab>
+  <Tab title="Throw">
+    Throws a `KeyNotFoundException`. Use in strict CI pipelines to catch missing translations before shipping.
+
+    ```csharp
+    .OnMissingKey(MissingKeyBehavior.Throw)
+    ```
+  </Tab>
+</Tabs>
+
+Subscribe to the `Loc.MissingKey` event to track untranslated strings at runtime without changing the fallback behavior:
+
+```csharp
+Loc.MissingKey += (locale, key) =>
+{
+    Analytics.Track("missing_translation", new { locale, key });
+};
+```
+
+## Testing with InMemoryProvider
+
+Use `InMemoryProvider` to test localization logic without touching the file system:
+
+```csharp
+[Fact]
+public void Plural_ShouldSelectCorrectForm()
+{
+    Loc.Configure(cfg => cfg
+        .SetFallbackLocale("en")
+        .AddProvider(new InMemoryProvider(new Dictionary<string, string>
+        {
+            ["item.count:one"]   = "{{count}} item",
+            ["item.count:other"] = "{{count}} items",
+        }))
+        .SetLocale("en")
+    );
+
+    Assert.Equal("1 item",  Loc.GetPlural("item.count", 1));
+    Assert.Equal("5 items", Loc.GetPlural("item.count", 5));
+}
+```
+
+<Tip>
+Call `Loc.Configure` again in each test or use `Loc.BeginScope` to isolate tests from one another without permanent global state changes.
+</Tip>

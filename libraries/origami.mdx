@@ -1,0 +1,629 @@
+---
+title: "Prowl.Origami: Full-Featured Immediate-Mode Widget Library"
+sidebarTitle: "Origami"
+description: "Prowl.Origami provides production-ready UI widgets — buttons, tables, trees, charts, docking layouts, and 3D gizmos — built on top of Prowl.Paper."
+---
+
+Prowl.Origami is a complete, production-ready widget library layered directly on top of Prowl.Paper. Where Paper gives you raw primitives — boxes, colors, events, transitions — Origami gives you buttons, sliders, tables, tree views, charts, dockable panels, and 3D viewport gizmos, all consistent in visual style and interaction model. The static `Origami` class is the single entry point: every widget factory is a static method that accepts a `Paper` instance, a string ID, and widget-specific arguments, returns a fluent builder you configure with method chains, and finalizes with `.Show()`. Because Origami is immediate-mode, there are no widget objects to store — call the factory each frame with the current state and Origami handles the rest.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Origami
+```
+
+## Frame Lifecycle
+
+Two calls bracket every frame that uses Origami widgets:
+
+```csharp
+// Before any widgets
+Origami.BeginFrame(paper, deltaSeconds);
+
+// --- all your widget calls here ---
+Origami.Button(paper, "save", "Save", () => Save()).Primary().Show();
+
+// After all widgets — renders modals, toasts, tooltips, drag-drop ghost
+Origami.EndFrame(paper);
+```
+
+<Warning>
+Skipping `EndFrame` means modals, toasts, and tooltips queued during that frame will not appear on screen — these overlay systems render in `EndFrame` so they draw on top of all other content.
+</Warning>
+
+`Origami.BeginFrame` also advances any in-progress theme transition (see Theming below). Two global read-only flags are worth knowing: `Origami.IsReadOnly` (set via `BeginReadOnly()`/`EndReadOnly()`) forces every widget into a disabled state within the scope, and `Origami.DropShadowsEnabled` / `Origami.GlowsEnabled` gate the two shadow effect classes globally.
+
+---
+
+## Theming
+
+`OrigamiTheme` is the complete visual configuration for a widget tree. It contains seven 4-stop color ramps, semantic surface colors, an `OrigamiMetrics` block for sizing constants, an `OrigamiIcons` set for widget chrome, and five font face slots.
+
+### Creating and Applying Themes
+
+```csharp
+// Apply a theme globally (snaps immediately)
+Origami.SetTheme(myTheme);
+
+// Animated transition to a new theme (smoothly lerps colors and metrics)
+Origami.SetTheme(newTheme, transitionSeconds: 0.4f);
+// Must tick the transition each frame:
+Origami.TickTransition(deltaSeconds);  // BeginFrame does this for you
+
+// Scope a theme to a region without changing the root
+using (Origami.PushTheme(gameTheme))
+{
+    Origami.Button(paper, "play", "Play").Primary().Show();
+}
+// theme reverts here
+```
+
+If no host calls `SetTheme`, Origami falls back to `OrigamiTheme.CreateDefaults()` — the built-in **"Nebula"** palette (frosted magenta-violet glass over a dark background).
+
+### Variants
+
+`OrigamiVariant` is the semantic style enum most widgets accept:
+
+| Variant | Maps to | Meaning |
+|---|---|---|
+| `Default` | Neutral ramp | Standard surface |
+| `Primary` | Primary ramp | Brand / call-to-action |
+| `Success` | Green ramp | Positive confirmation |
+| `Warning` | Amber ramp | Caution |
+| `Danger` | Red ramp | Destructive / error |
+| `Info` | Blue ramp | Informational |
+| `Subtle` | Neutral ramp (transparent low stops) | De-emphasized |
+
+Widgets expose `.Variant(OrigamiVariant v)` plus convenient shorthands like `.Primary()`, `.Danger()`, `.Success()`.
+
+### OrigamiRamp & OrigamiMetrics
+
+`OrigamiRamp` is a 7-stop color container (`C100` darkest → `C700` lightest). `OrigamiRamp.LerpColor` and `OrigamiRamp.Lerp` are the primitives used for theme transitions; reach for `LerpColor` when writing a custom widget that needs to interpolate colors during hover/press animations.
+
+`OrigamiMetrics` (`theme.Metrics`) holds every sizing constant: corner radii (`Rounding`, `ContainerRounding`, `SmallRounding`), row heights (`RowHeight`, `HeaderHeight`, `CompactHeight`), spacing scales, font sizes, docking metrics (`TabBarHeight`, `SplitterSize`), and node-graph metrics (`GraphPortRadius`, `GraphGridSpacing`). Swap one `OrigamiMetrics` instance to retheme density globally.
+
+---
+
+## Input Widgets
+
+Origami's input widgets produce values by calling your callback when a value changes. You pass in the current value each frame, and the widget handles interaction state, animations, and accessibility.
+
+<Tabs>
+  <Tab title="Button">
+    ```csharp
+    // Standard button
+    Origami.Button(paper, "save-btn", "Save", () => Save())
+        .Primary()
+        .Show();
+
+    // Icon button
+    Origami.Button(paper, "del-btn", "Delete", DeleteItem)
+        .Danger()
+        .LeadingIcon(OrigamiIconSet.Trash)
+        .Show();
+
+    // Toggle (stateful on/off button)
+    Origami.Toggle(paper, "dark-mode", isDarkMode, val => isDarkMode = val)
+        .Label("Dark Mode")
+        .Show();
+    ```
+  </Tab>
+  <Tab title="Slider">
+    ```csharp
+    // Single-value slider
+    Origami.Slider(paper, "volume", volume, 0f, 1f, val => volume = val)
+        .Label("Volume")
+        .ShowValue()
+        .Show();
+
+    // Range slider (two handles)
+    Origami.RangeSlider(paper, "range", minVal, maxVal, 0f, 100f,
+        (lo, hi) => { minVal = lo; maxVal = hi; })
+        .Show();
+    ```
+  </Tab>
+  <Tab title="Numeric & Text">
+    ```csharp
+    // Numeric field — supports math expressions like "180/4"
+    Origami.NumericField<float>(paper, "speed", speed, val => speed = val)
+        .Label("Speed")
+        .Min(0f).Max(100f)
+        .Show();
+
+    // Vector field (Float2, Float3, Float4, etc.)
+    Origami.VectorField(paper, "pos", position, val => position = val)
+        .Label("Position")
+        .Show();
+
+    // Text field
+    Origami.TextField(paper, "name", playerName, val => playerName = val)
+        .Placeholder("Enter name…")
+        .Show();
+    ```
+  </Tab>
+  <Tab title="Selectors">
+    ```csharp
+    // Dropdown
+    Origami.Dropdown(paper, "quality", qualityIndex, qualityOptions,
+        i => qualityIndex = i)
+        .Label("Quality")
+        .Show();
+
+    // Multi-select dropdown
+    Origami.MultiDropdown(paper, "tags", selectedTags, allTags,
+        tags => selectedTags = tags)
+        .Show();
+
+    // Radio group
+    Origami.RadioGroup(paper, "orient", selectedIndex, new[] { "Horizontal", "Vertical" },
+        i => selectedIndex = i)
+        .Show();
+
+    // Color picker
+    Origami.ColorField(paper, "tint", tintColor, c => tintColor = c)
+        .Label("Tint")
+        .Show();
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Layout & Navigation
+
+These widgets structure the page and handle navigation patterns.
+
+<CardGroup cols={2}>
+  <Card title="AppBar / MenuBar" icon="bars">
+    Top-level navigation containers. `AppBar` renders a full-width header with title, actions, and optional tabs. `MenuBar` renders a classic horizontal menu with drop-down items.
+  </Card>
+  <Card title="Tabs" icon="table-columns">
+    Horizontal or vertical tab strips. Pass the active index and an `onSelect` callback; each tab declares its label and optional icon.
+  </Card>
+  <Card title="Accordion" icon="layer-group">
+    Single-open collapsible sections. Add sections with `.Section(id, title, bodyAction)`. State is tracked internally — no external open/closed flag needed.
+  </Card>
+  <Card title="ScrollView" icon="scroll">
+    Clipped viewport with draggable scrollbar thumbs. Supports vertical and/or horizontal scrolling, smooth scroll, and a `Body(Action<ScrollViewport>)` overload for virtualized content.
+  </Card>
+</CardGroup>
+
+```csharp
+// ScrollView example
+Origami.ScrollView(paper, "log", width: 320, height: 400)
+    .Vertical(true)
+    .Body(() =>
+    {
+        foreach (var entry in logEntries)
+            Origami.Label(paper, entry.Id, entry.Text).Show();
+    });
+
+// Accordion example
+Origami.Accordion(paper, "settings")
+    .Section("general",  "General",  DrawGeneralSettings)
+    .Section("advanced", "Advanced", DrawAdvancedSettings)
+    .AllowAllClosed(false)
+    .Show();
+```
+
+Other layout helpers: `Breadcrumb` (with `Chevrons()`, `Slashes()`, `Dots()`, `Arrows()` separators), `Foldout` (single collapsible panel with animated height), `Header` (section dividers in `Text`, `Line`, `Box`, `Component` styles), `Label` (`Heading()`, `Caption()`, `Code()`, `Link()` presets), and `ContextMenu` / `RightClickMenu`.
+
+---
+
+## Overlays & Feedback
+
+All overlay widgets are queued during the frame and rendered by `Origami.EndFrame`. Only one modal or file dialog can be open at a time; toasts stack automatically.
+
+<Tabs>
+  <Tab title="Modal">
+    ```csharp
+    // Simple confirm dialog
+    Origami.Confirm("Discard changes?",
+        "You have unsaved edits.",
+        onYes: DiscardChanges);
+
+    // Fully custom modal
+    Modal.Custom("Settings", paper =>
+    {
+        Origami.Label(paper, "hint", "Theme").Show();
+        Origami.Dropdown(paper, "theme", themeIdx, themeNames,
+            i => themeIdx = i).Show();
+    }, width: 480).Show();
+    ```
+  </Tab>
+  <Tab title="Toasts">
+    ```csharp
+    Origami.Toast("Build complete")
+        .Message("All 42 files compiled successfully.")
+        .Success()
+        .Duration(4f)
+        .Show();
+
+    // Quick static shortcuts
+    Toasts.Error("Build failed", "3 errors found.");
+    Toasts.Warning("Deprecated API", "Update before next release.");
+    ```
+  </Tab>
+  <Tab title="Progress / Spinner">
+    ```csharp
+    // Determinate linear bar
+    Origami.ProgressBar(paper, "upload", uploadFraction)
+        .Label("Uploading…")
+        .ShowPercent()
+        .Glow()
+        .Show();
+
+    // Indeterminate spinner
+    Origami.Spinner(paper, "wait")
+        .Arc()
+        .MD()
+        .Label("Loading…")
+        .Show();
+
+    // Skeleton placeholder
+    Origami.Skeleton(paper, "name_ph")
+        .TextLine(160)
+        .Show();
+    ```
+  </Tab>
+  <Tab title="FileDialog">
+    ```csharp
+    Origami.OpenFileDialog(FileDialogMode.Open, path =>
+    {
+        if (path != null) LoadProject(path);
+    }, startPath: Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+       filters: new[] { "*.prowl", "*.json" });
+    ```
+    `FileDialogMode` values: `Open`, `Save`, `SelectFolder`.
+  </Tab>
+</Tabs>
+
+---
+
+## Data Display
+
+### Table
+
+A bordered data grid with typed columns, sortable headers, optional selection, and fixed-height virtualized scrolling.
+
+```csharp
+Origami.Table(paper, "assets", selectedRow, i => selectedRow = i)
+    .Column("Name",  flex: 2f, sortable: true)
+    .Column("Type",  flex: 1f)
+    .Column("Size",  flex: 1f, align: TextAlignment.MiddleRight)
+    .Row().Cell("Player.cs").Cell("Script").CellRight("4.2 KB")
+    .Row().Cell("Texture.png").Cell("Image").CellRight("512 KB")
+    .Scroll(600, 400)
+    .Virtualize()
+    .Show();
+```
+
+### Tree
+
+A virtualized hierarchical list with expand/collapse, checkboxes, drag-drop, rename, and context menus. Nodes are a flat, depth-first `List<TreeNode>`.
+
+```csharp
+var nodes = new List<TreeNode>
+{
+    new() { Id = "root",   Label = "Scene",       Depth = 0, HasChildren = true, DefaultExpanded = true },
+    new() { Id = "cam",    Label = "Main Camera", Depth = 1, IsLeaf = true },
+    new() { Id = "player", Label = "Player",      Depth = 1, IsLeaf = true },
+};
+
+Origami.Tree(paper, "hierarchy", 260, 400)
+    .Nodes(nodes)
+    .IsSelected(n => n.Id == selectedId)
+    .OnSelect(e => selectedId = e.Node.Id)
+    .Reorderable()
+    .OnDrop((node, target, pos) => Reparent(node, target, pos))
+    .Show();
+```
+
+`TreeDropPosition` tells you whether the node was dropped above, on, or below the target. Renameable nodes set `node.IsRenaming = true` to enter inline edit mode.
+
+### PropertyGrid
+
+Reflection-driven field editor for plain C# objects, similar to a Unity inspector.
+
+```csharp
+var config = new PropertyGridConfig();
+BuiltInFieldDrawers.Register(config.Drawers);
+config.Drawers.Register<Color>(new ColorFieldDrawer());
+
+Origami.PropertyGrid(paper, "inspector", selectedObject, config)
+    .OnChanged(obj => MarkDirty(obj))
+    .Show();
+```
+
+Register custom `FieldDrawer` subclasses to handle any type the built-in drawers don't cover.
+
+### NodeGraph
+
+A pannable, zoomable node-based graph editor. Nodes are real Paper elements, so text stays crisp at any zoom level.
+
+```csharp
+var nodes = new List<GraphNode>
+{
+    new() { Id = "in",  Title = "Input",  Position = new Float2(0, 0),
+            Outputs = { new GraphPort("out", "Value") } },
+    new() { Id = "out", Title = "Output", Position = new Float2(220, 0),
+            Inputs  = { new GraphPort("in",  "Value") } },
+};
+var conns = new List<GraphConnection> { new("in", "out", "out", "in") };
+
+Origami.NodeGraph(paper, "graph", 800, 500)
+    .Nodes(nodes)
+    .Connections(conns)
+    .OnConnect(req => conns.Add(new GraphConnection(req.FromNode, req.FromPort, req.ToNode, req.ToPort)))
+    .OnDeleteSelection(sel => sel.ForEach(id => RemoveNode(id)))
+    .Show();
+```
+
+---
+
+## Charts
+
+The `Chart` static class is the entry point for all chart widgets. Each factory returns a typed builder; chain configuration methods and call `.Show()` to render.
+
+```csharp
+// Line + bar composite
+Chart.CreateCartesian<FrameSample>(paper, "fps", frames)
+    .X(f => f.Time)
+    .YRange(0, 144)
+    .Axes()
+    .AddLineChart()
+        .Y(f => f.Fps).Name("FPS").Color(Color.LimeGreen).Fill()
+        .Cartesian
+    .AddBarChart()
+        .Y(f => f.FrameTimeMs).Name("Frame ms").Color(Color.OrangeRed)
+    .Zoomable().Pannable()
+    .Show();
+```
+
+<Accordion title="All Chart Types">
+
+| Factory | Description |
+|---|---|
+| `Chart.CreateCartesian<T>` | Shared x-axis container; add `.AddLineChart()`, `.AddBarChart()`, `.AddScatterPlot()`, `.AddBubbleChart()` modules |
+| `Chart.Histogram<T>` | Bins raw values into a bar histogram; supports multiple groups |
+| `Chart.Pie<T>` | Circular wedge chart; supports `.Explode(index)`, `.SortBy(...)` |
+| `Chart.Donut<T>` | Pie with a configurable hole (`.InnerRadius(0.6f)`) |
+| `Chart.Radar<T>` | Multi-series polygon over labelled spokes |
+| `Chart.FlameGraph<T>` | Hierarchical depth-first flame chart; requires `.Children(selector)` |
+
+All chart types share: `.Title(...)`, `.Size(w, h)`, `.Variant(...)`, `.Legend()`, `.LegendInteractive()`, `.EmptyLabel(...)`.
+
+Cartesian-specific options: `.Scale(AxisScale.Log)`, `.AutoFit()`, `.GridLines(x, y)`, `.Sampleable()`, `.ValueFormatter(v => ...)`.
+
+`MarkerShape` enum: `Circle`, `Square`, `Triangle`, `Diamond`, `Cross`. `CartesianInterpolation`: `Linear`, `CatmullRom`. `AxisScale`: `Linear`, `Log`.
+
+</Accordion>
+
+---
+
+## Docking Layouts
+
+Origami includes a full IDE-style docking system. Unlike the rest of the library, docking is not exposed through static factory methods — you construct a `DockSpace`, hold it for the application lifetime, and call `Draw` once per frame.
+
+```csharp
+// Build the initial layout tree
+var dockSpace = new DockSpace(
+    DockNode.Split(SplitDirection.Horizontal, 0.25f,
+        DockNode.Leaf(new SceneTreePanel()),
+        DockNode.Split(SplitDirection.Vertical, 0.7f,
+            DockNode.Leaf(new ViewportPanel(), new GameViewPanel()),
+            DockNode.Leaf(new ConsolePanel()))));
+
+// In your render loop
+dockSpace.Draw(paper, 0, 0, windowWidth, windowHeight);
+```
+
+### DockPanel — Custom Panels
+
+Implement `DockPanel` to create a dockable tab:
+
+```csharp
+public class ConsolePanel : DockPanel
+{
+    public override string Title => "Console";
+    public override string Icon  => "";   // optional glyph
+
+    public override void OnGUI(Paper paper, float width, float height)
+    {
+        Origami.ScrollView(paper, "log_scroll", width, height)
+            .Body(() =>
+            {
+                foreach (var line in _lines)
+                    Origami.Label(paper, line.Id, line.Text).Show();
+            });
+    }
+
+    // Optional: per-panel state serialization
+    public override bool SerializeState(out JsonObject? state) { state = null; return false; }
+    public override void RestoreState(JsonObject state) { }
+}
+```
+
+`DockNode.Leaf(params DockPanel[])` creates a tabbed leaf; `DockNode.Split(SplitDirection, ratio, a, b)` creates an internal split node. `SplitDirection.Horizontal` / `SplitDirection.Vertical`. `FloatingWindow` holds a `DockNode` plus `Position` and `Size`.
+
+### Layout Serialization
+
+```csharp
+// Save
+string json = DockSerializer.Serialize(dockSpace);
+File.WriteAllText("layout.json", json);
+
+// Load
+var floating = new List<FloatingWindow>();
+var root = DockSerializer.Deserialize(
+    File.ReadAllText("layout.json"),
+    floating,
+    (typeName, state) =>
+    {
+        DockPanel? panel = typeName switch
+        {
+            "MyApp.ConsolePanel"   => new ConsolePanel(),
+            "MyApp.InspectorPanel" => new InspectorPanel(),
+            _                      => null
+        };
+        if (panel != null && state != null) panel.RestoreState(state);
+        return panel;
+    });
+if (root != null) { dockSpace.Root = root; dockSpace.FloatingWindows.AddRange(floating); }
+```
+
+---
+
+## Drag & Drop
+
+`DragDrop` manages a single process-wide drag operation. Subclass `DragPayload` to carry your data.
+
+```csharp
+public sealed class AssetPayload : DragPayload
+{
+    public string AssetPath = "";
+    public override string DisplayName => System.IO.Path.GetFileName(AssetPath);
+}
+
+// On drag source (inside OnDragging handler)
+if (DragDrop.AcceptDrop<AssetPayload>(isHovered) == null && movedEnough)
+    DragDrop.StartDrag(new AssetPayload { AssetPath = assetPath });
+
+// On drop target
+var dropped = DragDrop.AcceptDrop<AssetPayload>(isHovered);
+if (dropped != null)
+    ImportAsset(dropped.AssetPath);
+```
+
+`DragDrop.IsDragging` is true while dragging. `DragDrop.IsDropFrame` is true on the single frame after release where a target can accept. `DragDrop.Cancel()` aborts the drag (also triggered by Escape).
+
+---
+
+## Property Grid / Field Drawers
+
+Custom types integrate with `PropertyGrid` by registering a `FieldDrawer`:
+
+```csharp
+public class MyAssetDrawer : FieldDrawer
+{
+    public override void Draw(Paper paper, string id, object? value, Type fieldType,
+        Action<object?> onChange, int depth)
+    {
+        var name = ((MyAsset?)value)?.Name ?? "";
+        Origami.TextField(paper, id, name, newName => onChange(new MyAsset(newName))).Show();
+    }
+}
+
+config.Drawers.Register<MyAsset>(new MyAssetDrawer());
+```
+
+`BuiltInFieldDrawers.Register(registry)` wires up drawers for all primitives (`bool`, `int`, `float`, `string`, …), vector types (`Float2/3/4`, `Int2/3/4`, `Double2/3/4`), and `Color`.
+
+---
+
+## 3D Gizmos
+
+The `Prowl.OrigamiUI.Gizmo` namespace provides move/rotate/scale handles (`TransformGizmo`) and an orientation view cube (`ViewManipulatorGizmo`). These are plain classes you drive manually — not `Origami.*` static factories.
+
+```csharp
+// Construct once
+var gizmo = new TransformGizmo(TransformGizmoMode.Universal);
+
+// Per frame
+gizmo.UpdateCamera(viewportRect, viewMatrix, projMatrix,
+    camUp, camForward, camRight, camPosition);
+gizmo.SetTransform(selected.Position, selected.Rotation, selected.Scale);
+
+gizmo.IsMouseDown = mouseDown;
+gizmo.IsMouseUp   = mouseUp;
+
+var ray    = ComputePickRay(mouseScreenPos, viewMatrix, projMatrix, viewportRect);
+var result = gizmo.Update(ray, mouseScreenPos, blockPicking: isOverOtherUI);
+
+if (result is { } r)
+{
+    if (r.TranslationDelta is { } t)   selected.Position += t;
+    if (r.RotationAxis is { } axis && r.RotationDelta is { } angle)
+        selected.Rotation = Quaternion.FromAxisAngle(axis, angle) * selected.Rotation;
+    if (r.Scale is { } s) selected.Scale = s;
+}
+
+gizmo.Draw(canvas);
+```
+
+`TransformGizmoMode` is a `[Flags]` enum with individual axis flags (`TranslateX/Y/Z`, `RotateX/Y/Z`, `ScaleX/Y/Z`, `ScaleUniform`, `Arcball`, plane handles like `TranslateXY/XZ/YZ`), and presets: `Translate`, `Rotate`, `ScaleAll`, `Universal`.
+
+`GizmoResult` reports nullable `TranslationDelta`, `RotationAxis`, `RotationDelta`, and `Scale` — check which fields are non-null rather than assuming a shape based on mode. `gizmo.IsOver` is true while a handle is hovered or dragged; use it to suppress camera orbit input.
+
+---
+
+## Icons
+
+Widget chrome (chevrons, close buttons, checkboxes) is drawn through `IOrigamiIcon`, so a host can swap the entire icon set. `OrigamiIcons` (`theme.Icons`) holds one named slot per chrome icon.
+
+```csharp
+// Override one slot with a font glyph
+theme.Icons.Trash = new FontIcon(myIconFont, "\uF1F8");
+
+// Override with raw SVG path data (16×16 viewBox)
+theme.Icons.Search = new SvgIcon("M7.2 12.4a5.2 5.2 0 1 0 0-10.4 5.2 5.2 0 0 0 0 10.4zM11.2 11.2L14.5 14.5");
+
+// Override with a custom draw action
+theme.Icons.ChevronDown = new IconAction((canvas, rect, color, stroke) =>
+{
+    canvas.MoveTo(rect.X + 3, rect.Y + 5);
+    canvas.LineTo(rect.X + 8, rect.Y + 11);
+    canvas.LineTo(rect.X + 13, rect.Y + 5);
+    canvas.Stroke(color, stroke);
+});
+```
+
+Set any icon slot to `null` to suppress that element's chrome entirely.
+
+---
+
+## Complete Example — Themed Frame
+
+The following example shows a complete Origami frame with a button group, a slider, and a simple two-column table.
+
+```csharp
+void DrawEditorUI(Paper paper, float dt)
+{
+    Origami.BeginFrame(paper, dt);
+
+    // Outer scroll container
+    Origami.ScrollView(paper, "main_scroll", 640, 480)
+        .Body(() =>
+        {
+            // ── Button group ──────────────────────────────────────
+            Origami.Label(paper, "lbl_mode", "Rendering Mode").FieldLabel().Show();
+
+            Origami.Button(paper, "btn_fwd",     "Forward",   () => SetMode(RenderMode.Forward))
+                .Primary().Show();
+            Origami.Button(paper, "btn_deferred", "Deferred", () => SetMode(RenderMode.Deferred))
+                .Subtle().Show();
+            Origami.Button(paper, "btn_wire",    "Wireframe", () => SetMode(RenderMode.Wireframe))
+                .Warning().Show();
+
+            // ── Exposure slider ───────────────────────────────────
+            Origami.Slider(paper, "exposure", exposure, 0f, 4f, v => exposure = v)
+                .Label("Exposure")
+                .ShowValue()
+                .Show();
+
+            // ── Stats table ───────────────────────────────────────
+            Origami.Label(paper, "lbl_stats", "Frame Statistics").Heading().Show();
+
+            Origami.Table(paper, "stats_table", -1, _ => { })
+                .Column("Metric", flex: 2f)
+                .Column("Value",  flex: 1f, align: TextAlignment.MiddleRight)
+                .Row().Cell("Draw Calls").CellRight(drawCalls.ToString())
+                .Row().Cell("Triangles").CellRight($"{triCount:N0}")
+                .Row().Cell("Frame Time").CellRight($"{frameTimeMs:F2} ms")
+                .Row().Cell("GPU Memory").CellRight($"{gpuMb} MB")
+                .Show();
+        });
+
+    Origami.EndFrame(paper);
+}
+```

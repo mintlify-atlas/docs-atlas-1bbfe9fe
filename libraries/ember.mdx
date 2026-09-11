@@ -1,0 +1,382 @@
+---
+title: "Prowl.Ember: Live Object Graph Migration for .NET Hot Reload"
+sidebarTitle: "Ember"
+description: "Prowl.Ember migrates live object graphs on hot reload, preserving reference identity, cycles, delegates, closures, and collections across assembly swaps."
+---
+
+Prowl.Ember is an in-place assembly state migration engine for .NET hot reload. When you recompile game code at runtime, the new assembly is loaded alongside the previous one. Ember walks the live object graph from watched static fields and caller-supplied roots, and for every object whose type was replaced in the new assembly it produces a replacement instance, carries field state across, and repoints every reference to it — preserving reference identity and cycles throughout. Both assemblies stay loaded; correctness never depends on the previous one unloading. Delegates, closures, lambdas, async state machines, generics, anonymous types, and all standard collection families are fully migrated.
+
+## Installation
+
+Prowl.Ember is split into three NuGet packages with distinct roles.
+
+<CardGroup cols={3}>
+  <Card title="Prowl.Ember" icon="engine">
+    The migration engine. References Mono.Cecil for IL reading. Reference this in your editor/engine host only.
+  </Card>
+  <Card title="Prowl.Ember.Contracts" icon="file-shield">
+    AOT-safe attributes and interfaces (`IReloadAware`, `[ReloadIgnore]`, `ReloadCache<,>`, etc.). No engine dependency — reference this in game code.
+  </Card>
+  <Card title="Prowl.Ember.Analyzers" icon="magnifying-glass">
+    Bundled Roslyn analyzer (EMBA001–EMBA005) that warns at compile time about patterns that won't survive hot reload.
+  </Card>
+</CardGroup>
+
+```bash
+# Engine / editor host
+dotnet add package Prowl.Ember
+
+# Game code (AOT-safe, minimal dependency)
+dotnet add package Prowl.Ember.Contracts
+```
+
+<Note>
+Game assemblies should reference only `Prowl.Ember.Contracts`. The engine package (`Prowl.Ember`) and its Cecil dependency should live in the host process, not inside the game DLL that gets reloaded.
+</Note>
+
+## Basic Reload
+
+Create a long-lived `ReloadEngine` once at startup. For each hot-reload event, construct a `ReloadRequest` describing which assemblies changed and which objects to use as explicit roots, then call `Apply`.
+
+```csharp
+using Prowl.Ember;
+
+// Create once at startup — long lived
+var engine = ReloadEngine.Create(options =>
+{
+    // Supply the raw IL bytes so Cecil can read field initializers and match closures
+    options.AssemblyBytes = asm => LoadedBytesFor(asm);
+
+    // Diagnostic sink — receives structured diagnostics with stable codes
+    options.Diagnostics = new DelegateDiagnosticSink(
+        d => Console.WriteLine($"[{d.Severity}] {d.Code} — {d.Message}"));
+
+    // Walk statics of these assemblies to discover live instances
+    options.Scope.Include(gameAssembly);
+
+    // Never descend into third-party or native interop namespaces
+    options.Scope.ExcludePrefix("Silk.NET");
+    options.Scope.ExcludePrefix("System.");
+});
+
+// Per reload — build a request describing the swap
+var request = ReloadRequest.Create()
+    .Replace(previousAssembly, currentAssembly)
+    .Roots(scene.AllComponents)   // explicit additional roots
+    .Build();
+
+ReloadReport report = engine.Apply(request);
+
+if (!report.Succeeded)
+{
+    foreach (var err in report.Errors)
+        Console.Error.WriteLine($"{err.Code}: {err.Message}");
+}
+
+// Rebind engine handles using the old→new instance map
+scene.Rebind(report.Replaced, report.Dropped);
+```
+
+## ReloadOptions
+
+`ReloadOptions` configures the long-lived engine. All settings are fixed at engine construction time.
+
+<ParamField body="Scope" type="ScopeRules">
+  Determines which assemblies are walked for static roots. Call `Include(assembly)` to register an assembly and `ExcludePrefix(string)` to filter out entire namespaces from graph traversal.
+</ParamField>
+
+<ParamField body="Migrators" type="MigratorRegistry">
+  Registry of `IValueMigrator` implementations. Seeded with all built-in migrators by default. Add custom migrators with `Migrators.Add(migrator)`.
+</ParamField>
+
+<ParamField body="AssemblyBytes" type="Func&lt;Assembly, byte[]?&gt;">
+  Callback that returns the raw IL bytes for a loaded assembly. Required for field initializer replay and closure matching via Mono.Cecil. A null resolver leaves both features unavailable.
+</ParamField>
+
+<ParamField body="NewFields" type="NewFieldPolicy">
+  How newly-added fields are initialized. `DeclaredInitializer` (default) replays field initializer IL. `Zero` leaves them null/default.
+</ParamField>
+
+<ParamField body="BrokenDelegates" type="BrokenDelegatePolicy">
+  What happens to delegates that cannot be rebuilt. `Drop` (default) sets them to null. `Throwing` replaces with a delegate that throws `ReloadedDelegateException`. `Preserve` keeps the previous delegate (pins the old assembly).
+</ParamField>
+
+<ParamField body="InertAnalysis" type="InertAnalysisMode">
+  How aggressively the engine prunes types with nothing migratable. `Full` (default) runs a reachability fixpoint. `Conservative` skips the fixpoint. `Off` visits everything.
+</ParamField>
+
+## IReloadAware
+
+Implement `IReloadAware` on any object that needs to tear down and re-establish registrations, native handles, or event subscriptions across a reload.
+
+```csharp
+using Prowl.Ember;
+
+public class PhysicsBody : IReloadAware
+{
+    private IntPtr _nativeHandle;
+    private string _shapeName = "capsule";
+
+    void IReloadAware.OnReloadDetach(ReloadState state)
+    {
+        // Runs on the OUTGOING instance while the graph is still intact.
+        // Stash anything the incoming instance needs to re-register.
+        state.Set("shapeName", _shapeName);
+        state.Set("transform", CurrentTransform());
+
+        // Tear down the native handle — the incoming instance will recreate it
+        PhysicsEngine.Destroy(_nativeHandle);
+        _nativeHandle = IntPtr.Zero;
+    }
+
+    void IReloadAware.OnReloadAttach(ReloadState state)
+    {
+        // Runs on the INCOMING instance after the whole graph is committed.
+        if (state.TryGet<string>("shapeName", out var name))
+            _shapeName = name;
+
+        if (state.TryGet<Transform>("transform", out var t))
+            ApplyTransform(t);
+
+        // Re-establish the native handle in the new assembly context
+        _nativeHandle = PhysicsEngine.Create(_shapeName);
+    }
+}
+```
+
+`IReloadObserver` provides two additional callbacks for the non-replacement outcomes:
+
+```csharp
+public class SceneManager : IReloadObserver
+{
+    void IReloadObserver.OnReloadPreserved()
+    {
+        // This instance carried over unchanged — safe to refresh caches
+        InvalidateCaches();
+    }
+
+    void IReloadObserver.OnReloadDropped()
+    {
+        // This instance's type was removed — every reference to it is now null
+        Console.WriteLine("SceneManager type was deleted.");
+    }
+}
+```
+
+## Attributes
+
+<ParamField body="[ReloadIgnore]" type="Attribute">
+  Applied to a field, auto-property, or type. Opts the target out of migration — the field gets its default value (not null) on the replacement instance. On an auto-property, also covers the compiler-generated backing field. On a type, prevents statics from being walked.
+</ParamField>
+
+<ParamField body="[ReloadInitializer]" type="Attribute">
+  Applied to a newly-added field. Names a parameterless instance method to call to initialize that field once all other fields are populated. Runs in place of the field initializer replay. Use `null` to leave the field at its default deliberately.
+</ParamField>
+
+```csharp
+public class EnemySpawner
+{
+    // This cache is deliberately not migrated — it rebuilds itself from
+    // the new assembly's types the first time it is accessed.
+    [ReloadIgnore]
+    private Dictionary<Type, SpawnConfig> _configCache = new();
+
+    // Newly added field: initialized by a method once the rest of the
+    // instance is populated, so it can read sibling fields.
+    [ReloadInitializer("InitSpawnPool")]
+    private ObjectPool<Enemy> _pool = null!;
+
+    private void InitSpawnPool()
+    {
+        _pool = new ObjectPool<Enemy>(MaxPoolSize);
+    }
+}
+```
+
+## ReloadCache&lt;TKey, TValue&gt;
+
+`ReloadCache<TKey, TValue>` (in `Prowl.Ember.Contracts`) is a thread-safe cache that empties itself on every reload, so entries derived from the previous assembly's types are not pinned. Store instances in `static readonly` fields so the migration engine can reach them.
+
+```csharp
+// Type-keyed reflection cache: stale the moment the assembly is replaced
+private static readonly ReloadCache<Type, MethodInfo?> _updateMethods
+    = new(type => type.GetMethod("Update", BindingFlags.Public | BindingFlags.Instance));
+
+// Later:
+var method = _updateMethods[entity.GetType()]; // computed on first access; cleared on reload
+```
+
+## Roslyn Analyzer Diagnostics
+
+The bundled `Prowl.Ember.Analyzers` package runs inside the compiler and reports four diagnostic codes.
+
+<Accordion title="EMBA001 — Static member of generic type">
+  **Severity:** Warning
+
+  Static fields and properties of open generic types (e.g., `static Cache<T>._entries`) cannot be enumerated by the migration engine. The reload silently resets them.
+
+  ```csharp
+  // ⚠ EMBA001: 'Cache<T>._data' will reset on reload
+  public class Cache<T>
+  {
+      private static Dictionary<string, T> _data = new(); // warning
+  }
+
+  // Fix: mark [ReloadIgnore] to make the reset explicit,
+  // or move the static out of the generic type.
+  public class Cache<T>
+  {
+      [ReloadIgnore]
+      private static Dictionary<string, T> _data = new(); // clear
+  }
+  ```
+</Accordion>
+
+<Accordion title="EMBA002 — Unmigrable field type">
+  **Severity:** Warning
+
+  Fields with pointer types, function pointer types, or `ref struct` fields are silently left at their default value during migration with no runtime diagnostic.
+
+  ```csharp
+  // ⚠ EMBA002: 'Handle' has type 'IntPtr*', which hot reload skips silently
+  public unsafe IntPtr* Handle; // warning
+
+  // Fix: mark [ReloadIgnore] and handle re-initialization in OnReloadAttach
+  [ReloadIgnore]
+  public unsafe IntPtr* Handle;
+  ```
+</Accordion>
+
+<Accordion title="EMBA003 — Invalid [ReloadInitializer] target">
+  **Severity:** Error
+
+  The method named in `[ReloadInitializer]` does not exist, is not parameterless, or is generic. The error is unrecoverable at reload time.
+
+  ```csharp
+  // ✗ EMBA003: 'SetupPool(int)' is not a parameterless instance method
+  [ReloadInitializer("SetupPool")]
+  private ObjectPool _pool = null!;
+
+  private void SetupPool(int size) { } // wrong signature
+  ```
+</Accordion>
+
+<Accordion title="EMBA005 — [ReloadIgnore] type with hooks">
+  **Severity:** Warning
+
+  A type marked `[ReloadIgnore]` also implements `IReloadAware` or `IReloadObserver`. The type is never visited so those interface methods are never called.
+
+  ```csharp
+  // ⚠ EMBA005: 'NativeBuffer' is marked [ReloadIgnore] but implements IReloadAware
+  [ReloadIgnore]
+  public class NativeBuffer : IReloadAware { … }
+  ```
+</Accordion>
+
+## Custom Migrators
+
+Implement `IValueMigrator` and register it to take ownership of specific types during the migration plan phase.
+
+```csharp
+public sealed class MyHandleMigrator : IValueMigrator
+{
+    public bool Handles(Type type) =>
+        typeof(INativeHandle).IsAssignableFrom(type);
+
+    public MigrationPlan Plan(Type type, PlanContext context)
+    {
+        // Return a plan that tears down and recreates native resources
+        return MigrationPlan.Custom((src, dst, ctx) =>
+        {
+            var srcHandle = (INativeHandle)src;
+            var dstHandle = (INativeHandle)dst;
+            dstHandle.ReinitializeFrom(srcHandle);
+        });
+    }
+
+    public bool ForcesVisit(Type type) => true;
+}
+
+// Register before the first Apply call
+engine.Options.Migrators.Add(new MyHandleMigrator());
+```
+
+### Built-in Migrators
+
+| Migrator | Handles |
+|---|---|
+| `ArrayMigrator` | All array types (multidimensional and jagged) |
+| `DelegateMigrator` | Single and multicast delegates, lambdas, closures, async state machines |
+| `HashContainerMigrator` | `Dictionary<,>`, `HashSet<>`, `ConcurrentDictionary<,>`, and subclasses |
+| `SequenceMigrator` | `List<>`, `Collection<>`, `ObservableCollection<>`, and custom `IList<>` |
+| `WeakReferenceMigrator` | `WeakReference`, `WeakReference<T>`, `ConditionalWeakTable<,>` |
+| `ImmutableMigrator` | All `System.Collections.Immutable.*` container families |
+| `ReflectionMigrator` | `Assembly`, `Type`, `MemberInfo`, `ParameterInfo` handles |
+| `EnumMigrator` | Enum values whose underlying type changed (truncates with diagnostic) |
+
+## Root Providers
+
+`ReloadOptions.Roots` is a `RootProviderCollection` that determines where the graph walk starts.
+
+<ParamField body="StaticFieldRoots" type="IRootProvider">
+  Walks every static field of every type in the scoped assemblies. Included by default. Skips open generic types (EMBA001), compiler-generated sealed closure types, and `[ReloadIgnore]` types.
+</ParamField>
+
+<ParamField body="ExplicitRoots" type="IRootProvider">
+  Caller-supplied list of specific object instances. Pass via `ReloadRequest.Create().Roots(instances).Build()`.
+</ParamField>
+
+## Report & Diagnostics
+
+`ReloadReport` is the output of every `Apply` call.
+
+<ParamField body="Succeeded" type="bool">
+  False when at least one diagnostic was reported at `ReloadSeverity.Error`.
+</ParamField>
+
+<ParamField body="Replaced" type="IReadOnlyDictionary&lt;object, object&gt;">
+  Every visited object whose replacement is a different instance, keyed by reference identity. Covers the entire migrated graph, not just the explicit roots.
+</ParamField>
+
+<ParamField body="Dropped" type="IReadOnlyList&lt;object&gt;">
+  Objects whose type was removed in the new assembly. Every reference to them was set to null during the walk.
+</ParamField>
+
+<ParamField body="Statistics" type="ReloadStatistics">
+  Per-phase counts and timings: `TypesPlanned`, `ObjectsReplaced`, `DelegatesRebuilt`, `PlanTime`, `MapTime`, `FillTime`, `RebuildTime`, `NotifyTime`. Zeroed when `ReloadOptions.CollectStatistics` is false.
+</ParamField>
+
+```csharp
+var report = engine.Apply(request);
+
+Console.WriteLine(
+    $"Replaced {report.Statistics.ObjectsReplaced} objects " +
+    $"in {report.Statistics.RebuildTime.TotalMilliseconds:F1} ms");
+
+foreach (var diag in report.Warnings)
+    Console.WriteLine($"[WARN] {diag.Code}: {diag.Message}");
+
+// Use the old→new map to rebind engine-side handles
+foreach (var (oldObj, newObj) in report.Replaced)
+    myObjectRegistry.Remap(oldObj, newObj);
+```
+
+### Diagnostic Sinks
+
+<ParamField body="DelegateDiagnosticSink" type="IDiagnosticSink">
+  Routes all diagnostics to a callback: `new DelegateDiagnosticSink(d => log.Write(d.Message))`.
+</ParamField>
+
+<ParamField body="FilteringDiagnosticSink" type="IDiagnosticSink">
+  Wraps another sink and drops diagnostics below a minimum severity: `new FilteringDiagnosticSink(inner, ReloadSeverity.Warning)`.
+</ParamField>
+
+## AssemblyMap / TypeMap / MemberMap
+
+Ember builds cross-assembly resolution maps at the start of each reload to correlate types and members between the previous and current assemblies.
+
+- **`AssemblyMap`** — tracks which assemblies are being substituted, added, or removed in this reload.
+- **`TypeMap`** — resolves a previous-assembly `Type` to its current-assembly counterpart. Handles generic instantiations and anonymous types (re-matched by property name).
+- **`MemberMap`** — resolves fields and methods across the swap, used by the migration planner to copy field values and by the delegate matcher to find target methods.
+
+These maps are constructed internally for each reload session and are accessible via `ReloadReport` for diagnostic purposes.

@@ -1,0 +1,365 @@
+---
+title: "Prowl.Photonic: CPU Path-Traced Lightmap Baker with AVX2 Acceleration"
+sidebarTitle: "Photonic"
+description: "Prowl.Photonic bakes HDR lightmap atlases using progressive CPU path tracing with BVH4 acceleration, configurable bounces, and SIMD AVX2 performance."
+---
+
+Prowl.Photonic is a CPU lightmap baker that produces HDR lightmap atlases through progressive path tracing. Its BVH4 acceleration structure uses binary SAH splitting collapsed to 4-wide nodes with `Vector128` SoA AABB packs, letting a single SIMD instruction test a ray against four bounding boxes simultaneously. On AVX2 hardware, leaf traversal processes eight triangles at once via Möller–Trumbore in `Vector256`. Workers run in parallel over atlas rows with deterministic per-texel seeding for reproducible output. The API follows an imperative builder pattern: open a scene, add meshes and lights, close it, then start a job that accumulates samples progressively or runs a fixed iteration count headless.
+
+## Installation
+
+```bash
+dotnet add package Prowl.Photonic
+```
+
+## Overall Workflow
+
+<Steps>
+  <Step title="Create LightmapBaker">
+    Instantiate `LightmapBaker` (implements `IDisposable`). Set `baker.Options` before starting a bake — options are read once when `Start()` is called and cannot be changed mid-bake.
+  </Step>
+  <Step title="Create LightmapTarget">
+    Call `baker.CreateTextureTarget(name, width, height)` to allocate an atlas page. You can create multiple targets for multi-page atlases.
+  </Step>
+  <Step title="Begin Scene">
+    Call `baker.BeginScene(name)` to get a `BakeScene`. A baker owns exactly one scene.
+  </Step>
+  <Step title="Add Meshes, Materials, and Lights">
+    Use `BakeScene.BeginMesh(...).Builder...End()` to register geometry, `scene.CreateMaterial(name)` for surface properties, and `scene.CreateDirectionalLight / CreatePointLight / CreateSpotLight` for illumination.
+  </Step>
+  <Step title="End Scene">
+    Call `scene.End()`. After this point the scene is immutable. Attempting to add further objects throws `InvalidOperationException`.
+  </Step>
+  <Step title="Add Instances to Targets">
+    For each mesh that should contribute to an atlas, call `target.AddBakeInstance(mesh, worldTransform)`. Provide optional `uvOffset` and `uvScale` to place the mesh's bake UV layer within the atlas.
+  </Step>
+  <Step title="Start or Run Iterations">
+    Call `baker.Start()` for continuous progressive baking (subscribe to `Job.OnIterationComplete` to re-upload the atlas each pass), or call `job.RunIterations(n)` for a headless fixed-count bake.
+  </Step>
+  <Step title="Read LDR or HDR">
+    After baking, call `target.ReadLDR(exposure, gamma)` for a tonemapped byte atlas ready for GPU upload, `target.ReadHDR()` for raw float data, or `target.ReadRGBM(maxRange)` for compact 8-bit HDR encoding.
+  </Step>
+</Steps>
+
+## LightmapBaker
+
+`LightmapBaker` is the top-level entry point. It owns the scene, all targets, and the running job.
+
+```csharp
+using Prowl.Photonic;
+using Prowl.Vector;
+
+using var baker = new LightmapBaker();
+
+// Global bake settings (configure before Start())
+baker.Options.Bounces            = 2;
+baker.Options.SamplesPerIteration = 1;
+baker.Options.IncludeDirectLighting = true;
+baker.Options.SparseStride       = 1;   // 1 = trace every texel
+
+// Create a 512×512 atlas page
+LightmapTarget target = baker.CreateTextureTarget("atlas0", 512, 512);
+```
+
+Key `LightmapBaker` methods:
+
+| Method | Description |
+|---|---|
+| `BeginScene(name)` | Create and return the single `BakeScene` |
+| `CreateTextureTarget(name, w, h)` | Allocate an atlas page; returns `LightmapTarget` |
+| `Start()` | Kick off continuous progressive baking on a background thread |
+| `Cancel()` | Cancel the running job via `CancellationToken` |
+| `BakeProbes(positions, samples, bounces)` | Batch-bake spherical-harmonic irradiance probes |
+
+## BakeOptions
+
+All global quality and behaviour knobs live on `baker.Options`:
+
+```csharp
+baker.Options.Bounces              = 2;        // indirect diffuse bounces; 0 = direct only
+baker.Options.SamplesPerIteration  = 1;        // rays per texel per iteration
+baker.Options.IncludeDirectLighting = true;    // false = indirect-only bake
+baker.Options.SparseStride         = 4;        // trace 1 in 4×4 and interpolate
+baker.Options.SparseIncludesDirect = false;    // keep direct lighting dense
+baker.Options.DilatePixels         = 2;        // edge dilation after each iteration
+baker.Options.FixSeams             = true;     // UV seam stitching pass
+baker.Options.SkyColor             = new Float3(0.2f, 0.4f, 0.8f);  // sky radiance
+baker.Options.Environment          = dir => SampleCubemap(dir);      // optional HDR sky
+baker.Options.DoBackfaceCull       = false;    // two-sided tracing
+baker.Options.RayBias              = 0f;       // 0 = auto-derived from scene size
+baker.Options.MaxRayDistance       = 0f;       // 0 = auto-derived from scene size
+baker.Options.Seed                 = 0x9E3779B97F4A7C15UL; // deterministic PRNG seed
+baker.Options.MaxDegreeOfParallelism = -1;     // -1 = runtime default
+```
+
+<Tip>
+Set `SparseStride` to 4–8 for fast previews of indirect-only bakes. Sparse sampling converges dramatically faster at the cost of fine GI detail; use `SparseStride = 1` for the final production bake.
+</Tip>
+
+## BakeScene
+
+`BakeScene` is created once via `baker.BeginScene(name)`. All scene mutation must happen before calling `scene.End()`.
+
+```csharp
+BakeScene scene = baker.BeginScene("Sponza");
+
+// --- Material ---
+BakeMaterial mat = scene.CreateMaterial("floor_tiles");
+mat.DiffuseColor   = new Float3(0.8f, 0.75f, 0.7f);
+mat.DiffuseTexture = scene.CreateTextureRGBA("floor_diff", 512, 512, rgbaBytes);
+mat.Emissive       = Float3.Zero;
+
+// --- Mesh (fluent builder) ---
+BakeMesh floorMesh = scene.BeginMesh("floor")
+    .AddVertices(positions, normals)       // Float3[] each
+    .AddUVLayer("UV0", materialUVs)        // Float2[] — material texcoords
+    .AddUVLayer("UV1", lightmapUVs)        // Float2[] — bake / lightmap texcoords
+    .AddMaterialGroup("floor_tiles", indices) // int[] triangle indices
+    .End();
+
+// --- Lights ---
+scene.CreateDirectionalLight(
+    "sun",
+    Float4x4.CreateLookAt(Float3.Zero, new Float3(-0.5f, -1f, -0.3f), Float3.UnitY),
+    color: new Float3(8f, 7f, 6f));        // linear HDR radiance
+
+scene.CreatePointLight(
+    "lamp",
+    Float4x4.CreateTranslation(0f, 3f, 0f),
+    color: new Float3(10f, 9f, 8f),
+    range: 8f);
+
+scene.End();  // seal the scene
+```
+
+## BakeMesh.Builder
+
+The fluent builder ensures valid mesh state before registration. All methods return `this` except `End()`, which returns the completed `BakeMesh`.
+
+| Method | Description |
+|---|---|
+| `AddVertices(positions, normals)` | Supply vertex positions and optional normals (`Float3[]`) |
+| `AddUVLayer(layerName, uvs)` | Register a named UV layer (`Float2[]`) |
+| `AddMaterialGroup(materialName, indices)` | Add a sub-mesh: triangle indices + material name |
+| `End()` | Finalize and register the mesh with the scene; returns `BakeMesh` |
+
+## Lights
+
+<CardGroup cols={3}>
+  <Card title="DirectionalLight" icon="sun">
+    Infinite parallel light. The `-Z` column of the world transform defines the light direction.
+  </Card>
+  <Card title="PointLight" icon="lightbulb">
+    Omnidirectional light with an explicit `range`. Uses `IAttenuation` (default: `InverseSquareAttenuation`).
+  </Card>
+  <Card title="SpotLight" icon="flashlight">
+    Cone-shaped light with `range` and `coneAngle`. Attenuation is pluggable via `IAttenuation`.
+  </Card>
+</CardGroup>
+
+All light types expose a `BakeDirect` flag. Setting it `false` on a light excludes its direct contribution from the baked texel while still allowing bounced light to propagate — the standard "indirect-only" mixed lighting pipeline.
+
+The `IAttenuation` interface controls how radiance falls off with distance for point and spot lights:
+
+| Implementation | Formula | Use case |
+|---|---|---|
+| `InverseSquareAttenuation` | `1 / d²` | Physically correct (default) |
+| `NormalizedQuadraticAttenuation` | Quadratic falloff to zero at `range` | Smooth artistic falloff |
+| `ConstantAttenuation` | No falloff | Debug / uniform fill lights |
+
+```csharp
+var lamp = scene.CreatePointLight("lamp", xform, color, range: 10f);
+lamp.Attenuation = new NormalizedQuadraticAttenuation();
+```
+
+## LightmapTarget & BakeInstance
+
+`LightmapTarget` holds the output HDR buffer and the list of mesh instances that contribute pixels to it.
+
+```csharp
+// Place mesh into the atlas — identity UV (mesh fills the whole page)
+BakeInstance inst = target.AddBakeInstance(floorMesh, worldTransform: Float4x4.Identity);
+
+// For atlas-packed instances, supply UV offset/scale
+target.AddBakeInstance(
+    wallMesh,
+    worldTransform: Float4x4.CreateTranslation(5f, 0f, 0f),
+    uvOffset: new Float2(0.5f, 0f),   // this instance lives in the right half
+    uvScale:  new Float2(0.5f, 1f),
+    bakeUVLayer: "UV1");
+```
+
+After the bake completes:
+
+```csharp
+// LDR preview (tonemapped, gamma-corrected — do NOT use for persistent storage)
+byte[] ldr = target.ReadLDR(exposure: 1f, gamma: 1f / 2.2f);
+
+// Raw HDR float array (RGB interleaved, linear)
+float[] hdr = target.ReadHDR();
+
+// Compact HDR as RGBM bytes
+byte[] rgbm = target.ReadRGBM(maxRange: 8f);
+
+// Coverage mask: 1 = baked texel, 0 = empty atlas space
+ReadOnlySpan<byte> coverage = target.Coverage;
+```
+
+## Job & JobStatus
+
+`Job` is returned by `baker.Start()`. Drive it via `Poll()` / `Wait()` / `RunIterations(n)`, and read `Status` to know when it finishes.
+
+```csharp
+// Option A: progressive (interactive editor baking)
+Job job = baker.Start();
+job.OnIterationComplete += iterCount =>
+{
+    byte[] preview = target.ReadLDR(1f, 1f / 2.2f);
+    UploadToGPU(preview);
+};
+
+// Render loop — cancel when enough quality is reached
+while (jobQualityOk == false)
+{
+    Thread.Sleep(16);
+    if (job.IterationCount >= 256)
+        baker.Cancel();
+}
+
+// Option B: headless fixed-count bake
+Job job2 = baker.Start();
+job2.RunIterations(64);   // blocks until 64 iterations complete, then returns
+baker.Cancel();           // stop the background worker
+```
+
+`JobStatus` values: `Pending` (still running), `Cancelled`, `Failed` (see `Job.Error`).
+
+| Member | Description |
+|---|---|
+| `Job.Status` | Current `JobStatus` |
+| `Job.IterationCount` | Number of completed accumulation passes |
+| `Job.Activity` | Free-text description of the current bake phase |
+| `Job.OnIterationComplete` | Event fired after each iteration |
+| `Job.Poll()` | Returns `true` while the background task is still running |
+| `Job.Wait()` | Block until the job finishes or is cancelled |
+| `Job.RunIterations(n)` | Block until exactly `n` iterations have completed |
+| `Job.Cancel()` | Signal cancellation via `CancellationToken` |
+
+## AutoAtlasResult
+
+`AutoAtlasPacker.Pack` bins a list of `(BakeMesh, Float4x4)` pairs across one or more `LightmapTarget` pages automatically, sizing each mesh's atlas footprint from its world-space surface area times the requested texel density.
+
+```csharp
+var meshList = new List<(BakeMesh, Float4x4)>
+{
+    (floorMesh, Float4x4.Identity),
+    (wallMesh,  Float4x4.CreateTranslation(0f, 0f, 5f)),
+};
+
+AutoAtlasResult result = AutoAtlasPacker.Pack(
+    baker,
+    meshList,
+    atlasWidth:  1024,
+    atlasHeight: 1024,
+    texelsPerWorldUnit: 64f,
+    padding: 2,
+    bakeUVLayer: "UV1");
+
+LightmapTarget[] pages = result.Targets;
+```
+
+## Spherical Harmonics
+
+`Sh9Rgb` stores a degree-2 spherical harmonics irradiance probe as three arrays of 9 coefficients (one per color channel). Use `baker.BakeProbes` to batch-bake probes at world positions and store them in `Sh9Rgb[]` for runtime ambient lighting.
+
+```csharp
+var probePositions = new Float3[] { new(0,1,0), new(5,1,0) };
+Sh9Rgb[] probes = baker.BakeProbes(probePositions, samples: 512, bounces: 2);
+
+// At runtime: evaluate irradiance for a surface normal
+Sh9Rgb probe = probes[0];
+probe.Add(in otherProbe);
+Sh9Rgb scaled = probe.Scaled(0.5f);
+```
+
+## Diagnostics
+
+`TexelDiagnostic` lets tooling inspect per-texel bake state for debugging lightmap artifacts.
+
+```csharp
+// Record rays for texel (100, 200) on target
+job.SetDebugTexel(target, x: 100, y: 200);
+
+// After an iteration, read back traced ray segments for visualization
+List<DebugSegment> segments = job.ReadDebugSegments();
+
+// Read structured data for a specific texel
+TexelDiagnostic diag = job.GetTexelInfo(target, x: 100, y: 200);
+if (diag.Valid)
+{
+    Console.WriteLine($"Position: {diag.Position}");
+    Console.WriteLine($"Normal: {diag.Normal}");
+    Console.WriteLine($"Lightmap value: {diag.LightmapValue}");
+    Console.WriteLine($"Indirect samples: {diag.IndirectSampleCount}");
+}
+```
+
+`BakeDiagnostics` (accessed via `baker.Options.Diagnostics`) provides additional override flags: `IgnoreAlbedo`, `DisableShadowLeakFix`, `DisableSmoothTerminator`, `DisableHemisphereLUT`. These make bakes worse on purpose to isolate the source of artifacts — never enable them in production bakes.
+
+## Complete Bake Example
+
+```csharp
+using Prowl.Photonic;
+using Prowl.Vector;
+
+// --- Setup ---
+using var baker = new LightmapBaker();
+baker.Options.Bounces            = 2;
+baker.Options.SamplesPerIteration = 1;
+baker.Options.IncludeDirectLighting = true;
+
+LightmapTarget target = baker.CreateTextureTarget("main_atlas", 512, 512);
+
+BakeScene scene = baker.BeginScene("Sponza");
+
+// Material
+var mat = scene.CreateMaterial("stone");
+mat.DiffuseColor = new Float3(0.7f, 0.68f, 0.65f);
+
+// Mesh (positions/normals/uvs from your mesh data)
+BakeMesh mesh = scene.BeginMesh("floor")
+    .AddVertices(positions, normals)
+    .AddUVLayer("UV0", materialUVs)
+    .AddUVLayer("UV1", lightmapUVs)
+    .AddMaterialGroup("stone", indices)
+    .End();
+
+// Directional sun light
+scene.CreateDirectionalLight(
+    "sun",
+    Float4x4.CreateLookAt(Float3.Zero, new Float3(-0.4f, -0.9f, -0.2f), Float3.UnitY),
+    color: new Float3(8f, 7f, 6f));
+
+// Point light (a lamp)
+scene.CreatePointLight(
+    "lamp",
+    Float4x4.CreateTranslation(0f, 4f, 0f),
+    color: new Float3(12f, 10f, 8f),
+    range: 10f);
+
+scene.End();
+
+// Place mesh into the atlas (fills the full 512×512 page)
+target.AddBakeInstance(mesh, Float4x4.Identity);
+
+// --- Headless bake: 64 iterations ---
+Job job = baker.Start();
+job.RunIterations(64);
+baker.Cancel();
+
+// --- Read result ---
+byte[] ldrAtlas = target.ReadLDR(exposure: 1f, gamma: 1f / 2.2f);
+// ldrAtlas is a Width*Height*3 byte array (RGB, sRGB) ready for GPU upload
+
+Console.WriteLine($"Baked {target.Width}×{target.Height} atlas, {job.IterationCount} iterations.");
+```

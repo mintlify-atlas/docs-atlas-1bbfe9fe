@@ -1,0 +1,91 @@
+---
+title: "Prowl.* Package Catalog — All 23 NuGet Packages"
+sidebarTitle: "Packages"
+description: "Complete reference of every Prowl.* NuGet package in the Anthology collection, grouped by domain with install commands and links to detailed docs."
+---
+
+Prowl Anthology publishes 23 individual `Prowl.*` NuGet packages from a single monorepo. Every package in the collection ships at the same version number — currently **3.4.0** — which means any combination of packages you install will always be mutually compatible. Installing a package is a single line regardless of which capability you need:
+
+```bash
+dotnet add package Prowl.<PackageName>
+```
+
+Or as a `<PackageReference>` in your project file:
+
+```xml
+<PackageReference Include="Prowl.<PackageName>" Version="3.4.0" />
+```
+
+<Tip>
+  All packages in the Anthology collection share the same version number. You can safely use any combination of `Prowl.*` packages in one project — just pin them all to the same version string and they will always be compatible with each other.
+</Tip>
+
+---
+
+## Math & Geometry
+
+| Package | Target Frameworks | Description | Install |
+|---|---|---|---|
+| `Prowl.Vector` | `netstandard2.1; net8; net9; net10` | 32-bit and 64-bit vector, matrix, and quaternion math. Includes `Float2/3/4`, `Double2/3/4`, `AABB`, `Quaternion`, `Maths`, bounding shapes, noise, splines, and animation curves. | `dotnet add package Prowl.Vector` |
+
+---
+
+## Rendering & Graphics
+
+<Note>
+  `Prowl.Graphite`, `Prowl.Graphite.ShaderDef`, and `Prowl.Graphite.ShaderDef.Compiler` target **`net10.0` only**. All other packages in this section support `net8.0` and above. Ensure your project's `<TargetFramework>` is set to `net10.0` before referencing the Graphite family.
+</Note>
+
+| Package | Target Frameworks | Description | Install |
+|---|---|---|---|
+| `Prowl.Graphite` | `net10` | Low-level, hardware-accelerated graphics and compute library with a Vulkan backend. Suitable for high-performance 2D/3D games, simulations, and tooling. | `dotnet add package Prowl.Graphite` |
+| `Prowl.Graphite.ShaderDef` | `net10` | The ShaderDef language spec and variant runtime for `Prowl.Graphite`. Defines the shader variant and keyword system. | `dotnet add package Prowl.Graphite.ShaderDef` |
+| `Prowl.Graphite.ShaderDef.Compiler` | `net10` | Slang-based shader parser and compiler for `Prowl.Graphite.ShaderDef`. Translates ShaderDef source into GPU-ready bytecode. | `dotnet add package Prowl.Graphite.ShaderDef.Compiler` |
+| `Prowl.Quill` | `netstandard2.1; net8; net9; net10` | GPU-accelerated 2D vector graphics renderer. Renders paths, curves, and styled strokes with high fidelity on the GPU. | `dotnet add package Prowl.Quill` |
+| `Prowl.Scribe` | `netstandard2.1; net8; net9; net10` | TrueType font loading, text layout, and Markdown rendering. The text foundation used by `Prowl.Quill` and `Prowl.Paper`. | `dotnet add package Prowl.Scribe` |
+| `Prowl.Slang` | `net8; net9; net10` | Native bindings for the [Slang](https://shader-slang.com/) shader compiler. Enables Slang shader compilation from managed .NET code. | `dotnet add package Prowl.Slang` |
+| `Prowl.Aperture` | `net8; net9; net10` | Dependency-free image loading for BMP, DDS, EXR, GIF, HDR, ICO, JPEG, PNG, PNM, PSD, RAW, TGA, TIFF, and WebP. Single unified API with pooled pixel memory. | `dotnet add package Prowl.Aperture` |
+
+---
+
+## User Interface
+
+| Package | Target Frameworks | Description | Install |
+|---|---|---|---|
+| `Prowl.Paper` | `netstandard2.1; net8; net9; net10` | Immediate-mode UI framework. Declare your UI each frame as plain C# code; Paper handles layout, input, and rendering. | `dotnet add package Prowl.Paper` |
+| `Prowl.Origami` | `net8; net9; net10` | Ready-made UI widgets and components built on top of `Prowl.Paper`. Provides buttons, sliders, panels, and other standard controls. | `dotnet add package Prowl.Origami` |
+| `Prowl.Scaffold` | `netstandard2.1; net8; net9; net10` | Incremental UI layout engine. Computes layout incrementally so unchanged subtrees are never revisited — ideal for large, data-driven UIs. | `dotnet add package Prowl.Scaffold` |
+
+---
+
+## Engine Systems
+
+<Note>
+  `Prowl.Wicked` automatically configures IL weaving via its bundled MSBuild `.targets` files — no additional setup is required. Simply add the `<PackageReference>` and your RPCs and `SyncVar` fields are woven at build time.
+</Note>
+
+| Package | Target Frameworks | Description | Install |
+|---|---|---|---|
+| `Prowl.Echo` | `netstandard2.1; net8; net9; net10` | High-performance serializer with source generation. Supports circular references, polymorphism, and complex collections. Serializes to an inspectable in-memory graph convertible to JSON, YAML, binary, or Echo text. | `dotnet add package Prowl.Echo` |
+| `Prowl.Clay` | `net8; net9; net10` | 3D model loading for GLTF, FBX, and OBJ. Produces a normalized mesh representation independent of file format. | `dotnet add package Prowl.Clay` |
+| `Prowl.Drift` | `netstandard2.1; net8; net9; net10` | 2D rigid-body physics engine. Provides collision detection, constraint solving, and a broad-phase pipeline for 2D game worlds. | `dotnet add package Prowl.Drift` |
+| `Prowl.Recast` | `netstandard2.1; net8; net9; net10` | Navmesh generation and pathfinding, based on a fork of DotRecast. Voxelizes geometry, builds navigation meshes, and runs A\* queries. | `dotnet add package Prowl.Recast` |
+| `Prowl.Photonic` | `net8; net9; net10` | Progressive CPU lightmapper. Accumulates global illumination samples over multiple frames without blocking gameplay. | `dotnet add package Prowl.Photonic` |
+| `Prowl.Unwrapper` | `net8; net9; net10` | Automatic mesh UV unwrapping. Generates texture coordinates for arbitrary triangle meshes suitable for lightmapping or texturing. | `dotnet add package Prowl.Unwrapper` |
+| `Prowl.Wicked` | `net8; net9; net10` | Lightweight C# networking with IL-woven RPCs, `SyncVar` fields, and a client-server architecture. MSBuild targets bundled in the package perform IL weaving automatically at build time. | `dotnet add package Prowl.Wicked` |
+| `Prowl.Rosetta` | `net8; net9; net10` | Localization utilities. Manages string tables and locale switching for multi-language games and applications. | `dotnet add package Prowl.Rosetta` |
+| `Prowl.Crumb` | `net8; net9; net10` | Lightweight, simple tokenizer. Suitable for parsing custom file formats, shader languages, or scripting DSLs. | `dotnet add package Prowl.Crumb` |
+| `Prowl.Ember` | `net8; net9; net10` | In-place assembly state migration for hot reload. Keeps both the old and new assembly loaded simultaneously so correctness never depends on the old one unloading. | `dotnet add package Prowl.Ember` |
+| `Prowl.Ember.Contracts` | `net8; net9; net10` | Dependency-free, AOT-safe attributes and lifecycle interfaces shared between `Prowl.Ember` and the assemblies being reloaded. Reference this from your runtime and game assemblies; reference the full `Prowl.Ember` only from your editor or host. | `dotnet add package Prowl.Ember.Contracts` |
+| `Prowl.Ember.Analyzers` | `netstandard2.0` | Roslyn analyzer that enforces hot-reload safety rules. Shipped inside `Prowl.Ember.Contracts` automatically, so reference this package only if you need to host the analyzer directly inside your own Roslyn compilation. | `dotnet add package Prowl.Ember.Analyzers` |
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with your first `Prowl.*` package — working code examples for Vector, Echo, and Aperture.
+  </Card>
+  <Card title="Monorepo & Contributing" icon="code-branch" href="/contributing">
+    Learn how libraries are folded into Anthology, how CI packs and publishes, and how to contribute a new library.
+  </Card>
+</CardGroup>

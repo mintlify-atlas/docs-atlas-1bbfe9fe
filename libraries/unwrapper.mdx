@@ -1,0 +1,282 @@
+---
+title: "Prowl.Unwrapper: Mesh UV Unwrapping for Lightmap Atlas Baking"
+sidebarTitle: "Unwrapper"
+description: "Prowl.Unwrapper produces non-overlapping UV atlases from arbitrary triangle meshes using Projection or Conformal LSCM algorithms in pure C#."
+---
+
+Prowl.Unwrapper is a pure-C# mesh UV unwrapper designed to produce lightmap-ready, non-overlapping UV atlases from arbitrary triangle geometry. Given a flat position array and an index buffer, it cleans the input mesh, segments it into charts, flattens each chart with a distortion-minimising solve, and packs everything into the unit square — returning per-corner UV coordinates with no native code dependencies and no GPU path required.
+
+## Installation
+
+Add the package to your project with the .NET CLI:
+
+```bash
+dotnet add package Prowl.Unwrapper
+```
+
+## Basic Usage
+
+Construct an `UnwrapMesh` with your vertex positions (`Double3[]`) and a flat triangle index buffer (`int[]`), then call `Unwrap()`. The result's `PerCornerUVs` array contains one `Double2` per triangle corner, laid out as `[tri0.c0, tri0.c1, tri0.c2, tri1.c0, ...]`.
+
+```csharp
+using Prowl.Unwrapper;
+using Prowl.Vector;
+
+// Build some geometry (here: a unit quad split into two triangles)
+Double3[] positions =
+[
+    new(0, 0, 0), new(1, 0, 0),
+    new(1, 1, 0), new(0, 1, 0),
+];
+int[] triangles = [0, 1, 2,  0, 2, 3];
+
+// Run the unwrap (Projection method is the default)
+UnwrapResult result = new UnwrapMesh(positions, triangles).Unwrap();
+
+// PerCornerUVs has 3 * triangleCount entries
+Double2[] uvs = result.PerCornerUVs;
+
+for (int tri = 0; tri < triangles.Length / 3; tri++)
+{
+    Double2 uv0 = uvs[tri * 3 + 0];
+    Double2 uv1 = uvs[tri * 3 + 1];
+    Double2 uv2 = uvs[tri * 3 + 2];
+    Console.WriteLine($"Triangle {tri}: ({uv0}), ({uv1}), ({uv2})");
+}
+
+// Degenerate triangles are reported so callers can stay aligned
+if (result.DegenerateTriangleIndices is { } skipped)
+{
+    foreach (int i in skipped)
+        Console.WriteLine($"Triangle {i} was degenerate — zero UVs assigned.");
+}
+```
+
+<Note>
+UVs are per-corner, not per-vertex. If your renderer needs a compact vertex buffer, you must split shared vertices at chart seams yourself.
+</Note>
+
+## Fluent Builder Methods
+
+`UnwrapMesh` exposes optional fluent modifiers before calling `Unwrap()`.
+
+<ParamField body="WithNormals(Double3[] normals)" type="UnwrapMesh">
+  Per-vertex normals. Coincident vertices whose normals diverge beyond a tolerance are kept as separate vertices during the welding pass, preventing incorrect merges on hard edges.
+</ParamField>
+
+<ParamField body="WithMaterialUVs(Double2[] perCornerUVs)" type="UnwrapMesh">
+  Existing per-corner material UVs (3 × triangle count). Edges where the material UV is discontinuous are marked as preferred cut locations during chart segmentation, so the unwrapper follows seams that artists have already placed.
+</ParamField>
+
+<ParamField body="WithProgress(Action<string> sink)" type="UnwrapMesh">
+  Receives a human-readable message at each pipeline phase (cleanup, segmentation, parametrisation, packing). Useful for progress bars on long Conformal unwraps. Pass `null` to silence.
+</ParamField>
+
+```csharp
+UnwrapResult result = new UnwrapMesh(positions, triangles)
+    .WithNormals(normals)
+    .WithMaterialUVs(existingUVs)
+    .WithProgress(msg => Console.WriteLine($"[Unwrap] {msg}"))
+    .Unwrap();
+```
+
+## UnwrapResult
+
+`UnwrapResult` is the output type returned by `Unwrap()`.
+
+<ParamField body="PerCornerUVs" type="Double2[]">
+  One UV per triangle corner, indexed as `3 * triangleIndex + cornerIndex`. Aligns with the original input triangle buffer — degenerate triangles receive zero UVs at their indices.
+</ParamField>
+
+<ParamField body="DegenerateTriangleIndices" type="int[]?">
+  Indices (into the original input) of triangles that collapsed to zero area or were otherwise removed during geometry cleanup. `null` when no triangles were removed.
+</ParamField>
+
+## UnwrapOptions
+
+`UnwrapOptions` carries all tuning parameters and is passed to `Unwrap(options)`. Every property has a sensible default.
+
+<ParamField body="Method" type="UnwrapMethod">
+  Which algorithm to use. `UnwrapMethod.Projection` (default) or `UnwrapMethod.Conformal`. See [Algorithm Modes](#algorithm-modes) below.
+</ParamField>
+
+<ParamField body="HardAngle" type="double">
+  Dihedral-angle threshold in degrees for treating an edge as a crease. Edges sharper than this become preferred cut boundaries. Default `88.0°`.
+</ParamField>
+
+<ParamField body="PackMargin" type="double">
+  Border added around each chart in UV space during bin-packing. `1.0/256.0` produces a one-texel safety margin at 256×256. Default `1.0/256.0`.
+</ParamField>
+
+<ParamField body="MaxDegreeOfParallelism" type="int">
+  Cap on worker threads for per-chart processing. `-1` means "as many as the runtime sees fit." Default `-1`.
+</ParamField>
+
+<ParamField body="Projection" type="ProjectionOptions">
+  Settings specific to the Projection algorithm.
+</ParamField>
+
+<ParamField body="Conformal" type="ConformalOptions">
+  Settings specific to the Conformal algorithm.
+</ParamField>
+
+## Algorithm Modes
+
+Prowl.Unwrapper ships two independent algorithms, selectable via `UnwrapOptions.Method`.
+
+<Tabs>
+  <Tab title="Projection (default)">
+    Every triangle picks the cube-face direction its normal is closest to. Connected triangles sharing the same cube-face direction form a chart, which is then flattened by projecting it onto that plane.
+
+    **When to use:** Lightmapping workflows where near-uniform texel density matters more than atlas coverage, or when turnaround time is a priority (import-time unwrapping).
+
+    | Metric | Value |
+    |---|---|
+    | Sponza (262k tris) | ~1.5 s |
+    | Atlas coverage | ~27% |
+    | L2 texture stretch | 1.00 |
+    | Cube directions | 6 (or 14 with `UseDiagonalAxes`) |
+
+    <Note>
+    Projection has no self-overlap validation pass. Connected surfaces that spiral back over themselves without leaving one cube-face bucket can self-overlap. Switch to Conformal if your content contains such shapes.
+    </Note>
+  </Tab>
+  <Tab title="Conformal (LSCM)">
+    Uses Lloyd-style chart segmentation scored by 3D compactness and developability, followed by Linear Angle-Based Flattening (LinABF) and a Least Squares Conformal Maps (LSCM) solve per chart. Produces fewer, larger charts with superior angle preservation.
+
+    **When to use:** When atlas space is at a premium, when long unbroken charts matter, or when baking signed-distance fields rather than lightmaps.
+
+    | Metric | Value |
+    |---|---|
+    | Sponza (262k tris) | ~11 s |
+    | Atlas coverage | ~43% |
+    | L2 texture stretch | 1.02 |
+
+    ```csharp
+    var result = new UnwrapMesh(positions, triangles)
+        .Unwrap(new UnwrapOptions { Method = UnwrapMethod.Conformal });
+    ```
+  </Tab>
+</Tabs>
+
+## ProjectionOptions
+
+<ParamField body="UseDiagonalAxes" type="bool">
+  Adds the eight cube-corner directions on top of the standard six face directions (14 total). Reduces worst-case stretch from 1.73× to 1.18×, at the cost of more charts and higher packing overhead. Default `false`.
+</ParamField>
+
+<ParamField body="MinChartTriangles" type="int">
+  Minimum triangle count for a chart to be kept standalone. Charts with fewer triangles fold into whichever adjacent chart they share the most border with. Default `2`.
+</ParamField>
+
+## ConformalOptions
+
+<ParamField body="AngleDistortionThreshold" type="double">
+  Maximum allowed mean angular distortion (0..1) before a merged chart is rejected. Default `0.08`.
+</ParamField>
+
+<ParamField body="AreaDistortionThreshold" type="double">
+  Maximum allowed mean area distortion (0..1) before a merged chart is rejected. Default `0.15`.
+</ParamField>
+
+<ParamField body="MergeTimeBudgetMs" type="long">
+  Wall-clock budget (milliseconds) for the chart-merge pass per connected region. On pathological inputs the merge walk can be quadratic; this cap stops runaway processing. Default `2000`.
+</ParamField>
+
+<ParamField body="CompactnessPower" type="double">
+  Exponent applied to the 3D distance metric when scoring chart-growth candidates. Default `0.7`.
+</ParamField>
+
+<ParamField body="LloydChangePrevThreshold" type="double">
+  Early-out threshold: if fewer than this fraction of facets changed chart compared to the previous iteration, segmentation is declared stable. Default `0.01`.
+</ParamField>
+
+```csharp
+var options = new UnwrapOptions
+{
+    Method     = UnwrapMethod.Conformal,
+    HardAngle  = 75.0,
+    PackMargin = 1.0 / 512.0,
+};
+options.Conformal.AngleDistortionThreshold = 0.05;
+options.Conformal.AreaDistortionThreshold  = 0.10;
+options.Conformal.MergeTimeBudgetMs        = 5000;
+options.Projection.UseDiagonalAxes         = true;
+
+var result = new UnwrapMesh(positions, triangles).Unwrap(options);
+```
+
+## Progress Reporting
+
+Long Conformal unwraps benefit from progress feedback. Supply any `Action<string>` sink via `.WithProgress()`:
+
+```csharp
+var result = new UnwrapMesh(positions, triangles)
+    .WithProgress(msg => progressBar.SetStatus(msg))
+    .Unwrap(new UnwrapOptions { Method = UnwrapMethod.Conformal });
+```
+
+Typical messages: `"Welding vertices..."`, `"Building half-edge mesh..."`, `"Segmenting charts (Lloyd)..."`, `"Solving LSCM..."`, `"Packing atlas..."`.
+
+## Pipeline Details
+
+Prowl.Unwrapper runs a multi-stage pipeline regardless of algorithm:
+
+<Steps>
+  <Step title="Geometry Cleanup">
+    Vertex welding (normal-aware: coincident vertices with opposing normals stay split), degenerate triangle removal (zero area, collinear corners), and non-manifold fixing via local edge cutting (Gueziec/Taubin). This phase ensures the half-edge mesh can be built correctly from real-world dirty geometry.
+  </Step>
+  <Step title="Chart Segmentation">
+    **Projection:** each triangle is assigned to the cube-face direction whose normal dot-product is highest. Connected same-direction triangles form a chart. Undersized charts fold into their best-fitting neighbour.
+
+    **Conformal:** Lloyd-style iterative growth scored by 3D compactness and developability. Hard edges (above `HardAngle`) are preferred cut locations. Adjacent chart pairs are trial-flattened and merged only if distortion stays within configured thresholds.
+  </Step>
+  <Step title="Chart Flattening">
+    **Projection:** each chart is dropped onto its projection plane — an O(n) pass.
+
+    **Conformal:** Linear Angle-Based Flattening (LinABF) produces an initial angle field; a Jacobi-preconditioned conjugate-gradient LSCM solve produces per-chart UVs, with two pinned boundary vertices for stable rotation.
+  </Step>
+  <Step title="Atlas Packing">
+    Convex hull and oriented bounding box per chart, then skyline-style bin packing with the configured `PackMargin`. The atlas grows by repeated doubling until every chart fits inside [0, 1] × [0, 1].
+  </Step>
+  <Step title="Per-Corner Output">
+    Charts are mapped back to the original triangle indices, producing the `PerCornerUVs` array. Split corners across seams receive their correct per-chart UV rather than a shared vertex UV.
+  </Step>
+</Steps>
+
+## Error Handling
+
+`UnwrapException` is thrown for unrecoverable input problems — typically geometry that collapses entirely during cleanup, or an index buffer inconsistent with the position count.
+
+```csharp
+try
+{
+    var result = new UnwrapMesh(positions, triangles).Unwrap();
+}
+catch (UnwrapException ex)
+{
+    Console.Error.WriteLine($"Unwrap failed: {ex.Message}");
+}
+```
+
+<Warning>
+`UnwrapException` indicates the mesh could not be cleaned to a usable state, not a misconfigured option. Validate your geometry (zero-area triangles, out-of-range indices) before filing a bug.
+</Warning>
+
+## Performance Notes
+
+<Accordion title="SIMD via System.Numerics.Vector&lt;double&gt;">
+  Vector inner products and matrix-vector multiplies in the conjugate-gradient solver use `System.Numerics.Vector<double>` for automatic SIMD dispatch on AVX2/SSE2 hardware. No platform-specific intrinsics are called directly.
+</Accordion>
+
+<Accordion title="Parallel chart processing">
+  `Parallel.For` distributes per-chart flattening across all logical cores, capped by `MaxDegreeOfParallelism`. On a CPU with many cores the Conformal pipeline scales roughly linearly with chart count.
+</Accordion>
+
+<Accordion title="Custom O(1) hash maps">
+  Half-edge lookups use custom open-addressing `long → int` and `long → double` tables with SplitMix64 mixing, approximately 5× faster than `Dictionary<long, int>` for the weld and twin-stitching workloads.
+</Accordion>
+
+<Accordion title="Sparse matrix">
+  The LSCM solve operates over a Jacobi-preconditioned CSC sparse matrix. Memory is allocated once per chart and reused across iterations; no GC pressure on the hot path.
+</Accordion>
